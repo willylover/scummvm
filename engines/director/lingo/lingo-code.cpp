@@ -326,6 +326,8 @@ void Lingo::popContext(bool aborting) {
 	debugC(5, kDebugLingoExec, "Popping frame %d", callstack.size());
 	CFrame *fp = callstack.back();
 	callstack.pop_back();
+	if (fp->retSpriteNum >= 0 && _vm->getCurrentMovie())
+		_vm->getCurrentMovie()->_currentSpriteNum = fp->retSpriteNum;
 
 	if (_state->stack.size() == fp->stackSizeBefore + 1) {
 		if (!fp->allowRetVal) {
@@ -1676,10 +1678,39 @@ void LC::call(const Common::String &name, int nargs, bool allowRetVal) {
 			firstArg = g_lingo->_state->stack[g_lingo->_state->stack.size() - nargs] = firstArg.eval();
 		}
 
+		// A symbol selects cast-member creation, even inside a script with a
+		// "new" handler of its own.
+		if (firstArg.type == SYMBOL && name.equalsIgnoreCase("new") &&
+				g_lingo->_builtinFuncs.contains(name)) {
+			call(g_lingo->_builtinFuncs[name], nargs, allowRetVal);
+			return;
+		}
+
+		// `save(castLib "name")` is Director's native cast command even when
+		// the current parent script also defines a method named `save`.
+		if (firstArg.type == CASTLIBREF && name.equalsIgnoreCase("save") &&
+				g_lingo->_builtinCmds.contains(name)) {
+			call(g_lingo->_builtinCmds[name], nargs, allowRetVal);
+			return;
+		}
+
 		// Script/Xtra method call
 		if (firstArg.type == OBJECT && !(firstArg.u.obj->getObjType() & (kFactoryObj | kXObj))) {
 			debugC(3, kDebugLingoExec, "Script/Xtra method called on object: <%s>", firstArg.asString(true).c_str());
 			AbstractObject *target = firstArg.u.obj;
+			// An explicit object-method call must not fall through to a movie or
+			// global handler after that object's score span has ended. Retained
+			// helper objects can still hold the old behavior briefly; Director
+			// treats a call through that dead reference as inert.
+			if (target->isDisposed()) {
+				debugC(3, kDebugLingoExec, "Ignoring method '%s' on disposed object <%s>",
+						name.c_str(), firstArg.asString(true).c_str());
+				for (int i = 0; i < nargs; i++)
+					g_lingo->pop();
+				if (allowRetVal)
+					g_lingo->pushVoid();
+				return;
+			}
 			if (name.equalsIgnoreCase("birth") || name.equalsIgnoreCase("new")) {
 				target = target->clone();
 			}
@@ -1821,6 +1852,7 @@ void LC::call(const Symbol &funcSym, int nargs, bool allowRetVal) {
 	if (funcSym.type != HANDLER) {
 		g_debugger->builtinHook(funcSym);
 		uint stackSizeBefore = g_lingo->_state->stack.size() - nargs;
+		uint callDepthBefore = g_lingo->_state->callstack.size();
 
 		if (target.type != VOID) {
 			// Only need to update the me obj
@@ -1847,6 +1879,10 @@ void LC::call(const Symbol &funcSym, int nargs, bool allowRetVal) {
 		}
 
 		uint stackSize = g_lingo->_state->stack.size();
+		// A builtin may schedule a Lingo handler whose result is produced
+		// later, including after a frame transition.
+		if (g_lingo->_state->callstack.size() > callDepthBefore)
+			return;
 
 		if (funcSym.u.bltin != LB::b_return && funcSym.u.bltin != LB::b_value) {
 			if (stackSize == stackSizeBefore + 1) {
@@ -1872,6 +1908,17 @@ void LC::call(const Symbol &funcSym, int nargs, bool allowRetVal) {
 	}
 
 	g_lingo->pushContext(funcSym, allowRetVal, defaultRetVal, paramCount, nargs);
+
+	// Behavior objects retain their score channel when invoked indirectly
+	// (for example from an actor/loop list). Director exposes that channel as
+	// the currentSpriteNum for the duration of the method call.
+	if (target.type == OBJECT && target.u.obj->hasProp("spriteNum") &&
+			g_director->getCurrentMovie()) {
+		CFrame *frame = g_lingo->_state->callstack.back();
+		if (frame->retSpriteNum < 0)
+			frame->retSpriteNum = g_director->getCurrentMovie()->_currentSpriteNum;
+		g_director->getCurrentMovie()->_currentSpriteNum = target.u.obj->getProp("spriteNum").asInt();
+	}
 }
 
 void LC::c_procret() {

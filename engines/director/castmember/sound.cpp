@@ -103,6 +103,7 @@ void SoundCastMember::load() {
 				Common::SeekableReadStreamEndian *sndData = _cast->getResource(it.tag, it.index);
 				if (!sndFormat)
 					sndFormat = new MoaSoundFormatDecoder();
+				_size = sndData->size();
 				sndFormat->loadSampleStream(*sndData);
 				delete sndData;
 			} else if (it.tag == MKTAG('e', 'd', 'i', 'M')) {
@@ -111,6 +112,7 @@ void SoundCastMember::load() {
 
 				if (!_audio) {
 					if (format.equalsIgnoreCase("kMoaCfFormat_AIFF")) {
+						_size = sndData->size();
 						_audio = new MoaStreamDecoder(format, sndData);
 						_loaded = true;
 						return;
@@ -125,15 +127,16 @@ void SoundCastMember::load() {
 				Common::SeekableReadStreamEndian *sndData = _cast->getResource(it.tag, it.index);
 
 				int32 numCuePoints = sndData->readSint32BE();
-				char cuePointName[32];
-
 				for (int i = 0; i < numCuePoints; i++) {
 					int32 cuePoint = sndData->readSint32BE();
 					_cuePoints.push_back(cuePoint);
 
-					sndData->read(cuePointName, 32);
-					cuePointName[31] = '\0';
-					_cuePointNames.push_back(cuePointName);
+					// Director stores cue names as fixed-size Pascal strings.
+					byte nameLength = MIN<byte>(sndData->readByte(), 31);
+					char cuePointName[32] = { 0 };
+					sndData->read(cuePointName, nameLength);
+					sndData->skip(31 - nameLength);
+					_cuePointNames.push_back(Common::String(cuePointName, nameLength));
 
 					debugC(2, kDebugLoading, "    Cue point %d: %d (%s) in sound cast member %d", i, cuePoint, cuePointName, _castId);
 				}

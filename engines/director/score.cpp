@@ -56,6 +56,14 @@ namespace Director {
 
 #include "director/palette-fade.h"
 
+static CastMemberID canonicalPaletteId(CastMemberID id) {
+	// Negative IDs select Director's built-in palettes. They are global and
+	// some score records spell their otherwise-unused cast library as 0.
+	if (id.member < 0)
+		id.castLib = -1;
+	return id;
+}
+
 Score::Score(Movie *movie, bool haveInteractivity) {
 	_movie = movie;
 	_window = movie->getWindow();
@@ -156,7 +164,20 @@ bool Score::processFrozenScripts(bool recursion, int count) {
 		if (state && !state->callstack.empty())
 			currentScript = state->callstack.front()->sp;
 		g_lingo->switchStateFromWindow();
-		bool completed = g_lingo->execute();
+		bool completed;
+		if (state->inputBranchTargetDepth >= 0) {
+			int targetDepth = state->inputBranchTargetDepth;
+			state->inputBranchTargetDepth = -1;
+			completed = g_lingo->execute(targetDepth);
+			if (completed && (int)state->callstack.size() == targetDepth) {
+				// The branching handler has finished. Its callers are the old
+				// mouse dispatch hierarchy and must not continue in the new frame.
+				while (!state->callstack.empty())
+					g_lingo->popContext(true);
+			}
+		} else {
+			completed = g_lingo->execute();
+		}
 		if (!completed || (recursion ? _window->frozenLingoRecursionCount() : _window->frozenLingoStateCount()) >= remainCount) {
 			debugC(3, kDebugLingoExec, "Score::processFrozenScripts(): State froze again mid-thaw, interrupting");
 			// Workaround for if a state gets moved to to the play state
@@ -671,7 +692,10 @@ void Score::update() {
 		// exitFrame is not called in this case.
 		if (_haveInteractivity && !_window->_skipFrameAdvance && !_exitFrameCalled) {
 			// Exit the current frame. This can include scopeless ScoreScripts.
-			_movie->processEvent(kEventExitFrame);
+			if (_version >= kFileVer600)
+				_movie->broadcastEvent(kEventExitFrame);
+			else
+				_movie->processEvent(kEventExitFrame);
 			_exitFrameCalled = true;
 			_skipIdle = false;
 		}
@@ -798,13 +822,34 @@ void Score::update() {
 	if (_window->_newMovieStarted)
 		renderCursor(_movie->getWindow()->getMousePos(), true);
 
-	_window->_newMovieStarted = false;
-
-	if (!_haveInteractivity)
+	if (!_haveInteractivity) {
+		_window->_newMovieStarted = false;
 		return;
+	}
 
 	// Window is drawn between the prepareFrame and enterFrame events (Lingo in a Nutshell, p.100)
 	renderFrame(_curFrameNumber, kRenderModeNormal, sound1Changed, sound2Changed);
+	if (_window->_newMovieStarted) {
+		// prepareMovie runs before Director prepares the first score frame. Cast
+		// members placed into otherwise empty channels can participate in the
+		// opening transition, but are not part of the settled first frame.
+		bool cleanedTransientChannels = false;
+		for (uint ch = 1; ch < _channels.size() && ch < _currentFrame->_sprites.size(); ch++) {
+			Sprite *authored = _currentFrame->_sprites[ch];
+			Sprite *live = _channels[ch]->_sprite;
+			if (authored->_castId.isNull() && !live->_castId.isNull() && live->getAutoPuppet(kAPCast)) {
+				Common::Rect oldBbox = _channels[ch]->getBbox();
+				live->setAutoPuppet(kAPCast, false);
+				_channels[ch]->setClean(authored);
+				_channels[ch]->_lastRenderedBbox = oldBbox;
+				_channels[ch]->setNeedsDraw();
+				cleanedTransientChannels = true;
+			}
+		}
+		if (cleanedTransientChannels)
+			_window->render();
+	}
+	_window->_newMovieStarted = false;
 
 	// then call the stepMovie hook (if one exists)
 	// D4 and above only call it if _allowOutdatedLingo is enabled.
@@ -827,7 +872,10 @@ void Score::update() {
 	if (!_window->_playbackPaused) {
 		_exitFrameCalled = false;
 		if (_version >= kFileVer400) {
-			_movie->processEvent(kEventEnterFrame);
+			if (_version >= kFileVer600)
+				_movie->broadcastEvent(kEventEnterFrame);
+			else
+				_movie->processEvent(kEventEnterFrame);
 		}
 	}
 	if (_window->frozenLingoStateCount() > count)
@@ -1044,10 +1092,16 @@ bool Score::renderPrePaletteCycle(RenderMode mode) {
 		return false;
 
 	// Skip this if we don't have a palette instruction
-	CastMemberID currentPalette = _currentFrame->_mainChannels.palette.paletteId;
+	CastMemberID currentPalette = canonicalPaletteId(_currentFrame->_mainChannels.palette.paletteId);
 	if (currentPalette.isNull())
 		return false;
 
+	// A movie starts with its own palette already installed. Fading from the
+	// previous movie's palette leaves the previous frame visible during loading.
+	if (_window->_newMovieStarted || _vm->_lastPalette.isNull()) {
+		_vm->setPalette(currentPalette);
+		return false;
+	}
 	if (!_currentFrame->_mainChannels.palette.colorCycling &&
 		!_currentFrame->_mainChannels.palette.overTime) {
 
@@ -1077,7 +1131,7 @@ bool Score::renderPrePaletteCycle(RenderMode mode) {
 		if (_currentFrame->_mainChannels.palette.normal) {
 			// If the target palette ID is the same as the previous palette ID,
 			// a normal fade is a no-op.
-			if (_currentFrame->_mainChannels.palette.paletteId == _vm->_lastPalette) {
+			if (currentPalette == _vm->_lastPalette) {
 				return false;
 			}
 
@@ -1161,7 +1215,7 @@ void Score::setLastPalette() {
 		return;
 
 	bool isCachedPalette = false;
-	CastMemberID currentPalette = _currentFrame->_mainChannels.palette.paletteId;
+	CastMemberID currentPalette = canonicalPaletteId(_currentFrame->_mainChannels.palette.paletteId);
 	// Director allows you to use palette IDs for cast members
 	// that have long since been erased. Check all of them.
 	if (!_vm->hasPalette(currentPalette))
@@ -1170,13 +1224,13 @@ void Score::setLastPalette() {
 	if (currentPalette.isNull()) {
 		// Use the score cached palette ID
 		isCachedPalette = true;
-		currentPalette = _currentFrame->_mainChannels.scoreCachedPaletteId;
+		currentPalette = canonicalPaletteId(_currentFrame->_mainChannels.scoreCachedPaletteId);
 		if (!_vm->hasPalette(currentPalette))
 			currentPalette = CastMemberID();
 		// The cached ID is created before the cast gets loaded; if it's zero,
 		// this corresponds to the movie default palette.
 		if (currentPalette.isNull()) {
-			currentPalette = _vm->getCurrentMovie()->_defaultPalette;
+			currentPalette = canonicalPaletteId(_vm->getCurrentMovie()->_defaultPalette);
 		}
 		// If for whatever reason this doesn't resolve, abort.
 		if (currentPalette.isNull())
@@ -1210,7 +1264,7 @@ void Score::renderPaletteCycle(RenderMode mode) {
 
 	// If the palette is defined in the frame and doesn't match
 	// the current one, set it
-	CastMemberID currentPalette = _currentFrame->_mainChannels.palette.paletteId;
+	CastMemberID currentPalette = canonicalPaletteId(_currentFrame->_mainChannels.palette.paletteId);
 	if (currentPalette.isNull())
 		return;
 
@@ -1679,8 +1733,12 @@ uint16 Score::getSpriteIDFromPos(Common::Point pos) {
 	return 0;
 }
 
-uint16 Score::getMouseSpriteIDFromPos(Common::Point pos) {
-	for (int i = _channels.size() - 1; i >= 0; i--) {
+uint16 Score::getMouseSpriteIDFromPos(Common::Point pos, int maxChannel) {
+	int firstChannel = _channels.size() - 1;
+	if (maxChannel >= 0)
+		firstChannel = MIN(firstChannel, maxChannel);
+
+	for (int i = firstChannel; i >= 0; i--) {
 		CollisionTest test = _channels[i]->isMouseIn(pos);
 		if (test == kCollisionYes && _channels[i]->_sprite->respondsToMouse())
 			return i;
@@ -1725,9 +1783,10 @@ Common::Array<Channel *> Score::getSpriteIntersections(const Common::Rect &r) {
 
 	for (uint i = 0; i < _channels.size(); i++) {
 		if (!_channels[i]->isEmpty() && !r.findIntersectingRect(_channels[i]->getBbox()).isEmpty()) {
-			// Editable text sprites will (more or less) always be rendered in front of other sprites,
-			// regardless of their order in the channel list.
-			if (_channels[i]->getEditable()) {
+			// Before D6 editable fields were native controls and stayed above
+			// stage sprites. D6 fields participate in the sprite channel order;
+			// this also lets authored cursor sprites remain visible over them.
+			if (g_director->getVersion() < 600 && _channels[i]->getEditable()) {
 				appendix.push_back(_channels[i]);
 			} else {
 				intersections.push_back(_channels[i]);
@@ -1947,11 +2006,16 @@ void Score::loadFrames(Common::SeekableReadStreamEndian &stream, uint16 version,
 		_indexStart = listStart + 3 * 4;
 		_frameDataOffset = _indexStart + listSize * 4;
 
-		_spriteDetailOffsets.resize(numEntries);
-		_spriteDetailAccessed.resize(numEntries);
+		// The offset table contains one entry for each detail plus a trailing
+		// end offset. `listSize` describes the complete index area and may be
+		// larger than this table. Keep the sentinel so the final detail has a
+		// computable size in getSpriteDetailsStream().
+		const int offsetCount = numEntries + 1;
+		_spriteDetailOffsets.resize(offsetCount);
+		_spriteDetailAccessed.resize(offsetCount);
 
 		int prevOff = 0;
-		for (int i = 0; i < numEntries; i++) {
+		for (int i = 0; i < offsetCount; i++) {
 			uint32 off = _framesStream->readUint32();
 			_spriteDetailOffsets[i] = _frameDataOffset + off;
 			_spriteDetailAccessed[i] = false;

@@ -80,8 +80,8 @@ Movie::Movie(Window *window) {
 	_sharedCast = nullptr;
 	_score = new Score(this, true);
 
-	_selEnd = -1;
-	_selStart = -1;
+	_selEnd = 0;
+	_selStart = 0;
 
 	_checkBoxType = 0;
 	_checkBoxAccess = 0;
@@ -855,6 +855,11 @@ Common::String Movie::formatMovieInfo() {
 }
 
 Common::String InfoEntry::readString(bool pascal) {
+	Movie *movie = g_director->getCurrentMovie();
+	return readString(movie ? movie->getCast() : nullptr, pascal);
+}
+
+Common::String InfoEntry::readString(Cast *cast, bool pascal) {
 	Common::String res;
 
 	if (len == 0)
@@ -868,11 +873,9 @@ Common::String InfoEntry::readString(bool pascal) {
 			encodedStr += data[i];
 	}
 
-	// FIXME: Use the cast which contains this string, not the main cast.
-	Movie *movie = g_director->getCurrentMovie();
-	if (!movie || !movie->getCast())
+	if (!cast)
 		return encodedStr; // no cast to decode against yet
-	return movie->getCast()->decodeString(encodedStr).encode(Common::kUtf8);
+	return cast->decodeString(encodedStr).encode(Common::kUtf8);
 }
 
 void InfoEntry::writeString(Common::String string, bool pascal) {
@@ -880,9 +883,11 @@ void InfoEntry::writeString(Common::String string, bool pascal) {
 		return;
 	}
 
-	data = (byte *)malloc(len);
+	data = (byte *)calloc(len, 1);
 
 	uint16 start = pascal ? 1 : 0;
+	if (pascal)
+		data[0] = MIN<uint32>(string.size(), 255);
 	memcpy(data + start, string.c_str(), string.size());
 }
 

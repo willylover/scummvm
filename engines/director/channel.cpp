@@ -298,18 +298,27 @@ bool Channel::isDirty(Sprite *nextSprite) {
 	bool isDirtyFlag = _widgetDirty ||
 		(_sprite->_cast && _sprite->_cast->isModified());
 
-	if (_sprite && !_sprite->_puppet && !_sprite->_autoPuppet) {
-		// When puppet is set, the overall dirty flag should be set when sprite is
-		// modified.
-		isDirtyFlag |= _sprite->_castId != nextSprite->_castId ||
-			_sprite->_ink != nextSprite->_ink || _sprite->_backColor != nextSprite->_backColor ||
-			_sprite->_foreColor != nextSprite->_foreColor ||
-			_sprite->_blendAmount != nextSprite->_blendAmount ||
+	if (_sprite && !_sprite->_puppet) {
+		// Auto-puppet is property-specific. An overridden location, for example,
+		// must not prevent a score change from replacing the cast member.
+		if (!_sprite->getAutoPuppet(kAPCast))
+			isDirtyFlag |= _sprite->_castId != nextSprite->_castId;
+		if (!_sprite->getAutoPuppet(kAPInk))
+			isDirtyFlag |= _sprite->_ink != nextSprite->_ink;
+		if (!_sprite->getAutoPuppet(kAPBackColor))
+			isDirtyFlag |= _sprite->_backColor != nextSprite->_backColor;
+		if (!_sprite->getAutoPuppet(kAPForeColor))
+			isDirtyFlag |= _sprite->_foreColor != nextSprite->_foreColor;
+		isDirtyFlag |= _sprite->_blendAmount != nextSprite->_blendAmount ||
 			(_sprite->_thickness & kTThickness) != (nextSprite->_thickness & kTThickness);
-		if (!_sprite->_moveable)
+		if (!_sprite->_moveable && !_sprite->getAutoPuppet(kAPLoc))
 			isDirtyFlag |= _sprite->getPosition() != nextSprite->getPosition();
-		if (isStretched() && !hasTextCastMember(_sprite))
-			isDirtyFlag |= _sprite->_width != nextSprite->_width || _sprite->_height != nextSprite->_height;
+		if (isStretched() && !hasTextCastMember(_sprite)) {
+			if (!_sprite->getAutoPuppet(kAPWidth))
+				isDirtyFlag |= _sprite->_width != nextSprite->_width;
+			if (!_sprite->getAutoPuppet(kAPHeight))
+				isDirtyFlag |= _sprite->_height != nextSprite->_height;
+		}
 	}
 
 	return isDirtyFlag;
@@ -528,13 +537,21 @@ void Channel::setClean(Sprite *nextSprite, bool partial) {
 
 	// if spriteType is changing, then we may need to re-create the widget since spriteType will guide when we creating widget
 	bool spriteTypeChanged = _sprite->_spriteType != nextSprite->_spriteType;
+	bool scoreReplacesCast = !_sprite->_puppet && !_sprite->getAutoPuppet(kAPCast) &&
+		_sprite->_castId != nextSprite->_castId;
 
 	if (nextSprite) {
 		// for the non-puppet QDShape, since we won't use isDirty to check whether the QDShape is changed.
 		// so we may always keep the sprite info because we need it to draw QDShape.
-		if (_sprite->_puppet || _sprite->_autoPuppet || (!nextSprite->isQDShape() && partial)) {
+		if (_sprite->_puppet || (_sprite->_autoPuppet && !scoreReplacesCast) || (!nextSprite->isQDShape() && partial)) {
 			// Updating scripts, etc. does not require a full re-render
 			_sprite->_scriptId = nextSprite->_scriptId;
+			if (g_director->getVersion() >= 600) {
+				_sprite->_behaviors = nextSprite->_behaviors;
+				_sprite->_spriteInfo = nextSprite->_spriteInfo;
+				_startFrame = nextSprite->_spriteInfo.startFrame;
+				_endFrame = nextSprite->_spriteInfo.endFrame;
+			}
 		} else {
 			previousCastId = _sprite->_castId;
 			replaceSprite(nextSprite);
@@ -607,8 +624,9 @@ void Channel::setEditable(bool editable) {
 		// if the sprite is editable, then we refresh the selEnd and setStart
 		if (_widget) {
 			((Graphics::MacText *)_widget)->setEditable(editable);
-			// we only set the first editable text member in score active
-			if (editable) {
+			// Cast-member editability only makes the field capable of editing.
+			// Sprite editability identifies a field that should receive focus.
+			if (editable && _sprite->_editable) {
 				Graphics::MacWidget *activewidget = g_director->_wm->getActiveWidget();
 				if (activewidget == nullptr || !activewidget->isEditable())
 					g_director->_wm->setActiveWidget(_widget);
@@ -760,12 +778,22 @@ void Channel::replaceWidget(CastMemberID previousCastId, bool force) {
 		if (_sprite->_cast->needsReload()) {
 			_sprite->_cast->load();
 		}
-		// always use the unstretched dims.
-		// because only the stretched sprite will have different channel size and sprite size
-		// we need the original image to scale the sprite.
-		// for the scaled bitmap castmember, it has scaled dims on sprite size, so we don't have to worry about it.
-		Common::Rect bbox(getBbox(true));
+		// Explicitly stretched sprites keep a native-sized widget; their scale is
+		// handled by the established stretched-sprite path. Some scores also store
+		// scaled bitmap dimensions without setting the stretch flag. In that case,
+		// build the widget at the score size so createWidget() performs the scale.
+		// Text layout is defined by the sprite rectangle in the score. Other
+		// media normally use their unstretched source bounds.
+		bool useUnstretchedBbox = _sprite->_cast->_type != kCastText;
+		if (_sprite->_cast->_type == kCastBitmap && !_sprite->_stretch) {
+			Common::Rect castBbox = _sprite->_cast->getBbox();
+			useUnstretchedBbox = castBbox.width() == _sprite->_width &&
+				castBbox.height() == _sprite->_height;
+		}
+		Common::Rect bbox(getBbox(useUnstretchedBbox));
 		_sprite->_cast->setModified(false);
+		if (bbox.isEmpty())
+			return;
 
 		_widget = _sprite->_cast->createWidget(bbox, this, _sprite->_spriteType);
 		if (_widget) {

@@ -135,6 +135,8 @@ void DirectorSound::playStream(Audio::AudioStream &stream, int soundChannel) {
 	cancelFade(soundChannel);
 
 	_mixer->stopHandle(_channels[soundChannel]->handle);
+	_channels[soundChannel]->lastCuePointIndex = -1;
+	_channels[soundChannel]->lastReportedActive = -1;
 
 	setChannelDefaultVolume(soundChannel);
 
@@ -353,15 +355,16 @@ bool DirectorSound::isChannelActive(int soundChannel) {
 	if (!assertChannel(soundChannel))
 		return false;
 
-	if (!_mixer->isSoundHandleActive(_channels[soundChannel]->handle))
-		return false;
+	SoundChannel *channel = _channels[soundChannel];
+	bool active = _mixer->isSoundHandleActive(channel->handle);
 
-	// Looped sounds are considered to be inactive after the first play
-	// WORKAROUND HACK
-	if (_channels[soundChannel]->loopPtr != nullptr)
-		return _channels[soundChannel]->loopPtr->getCompleteIterations() < 1;
+	if (channel->lastReportedActive != (int8)active) {
+		debugC(3, kDebugSound, "DirectorSound::isChannelActive(): channel %d -> %d at %u ms",
+			soundChannel, active, _mixer->getSoundElapsedTime(channel->handle));
+		channel->lastReportedActive = active;
+	}
 
-	return true;
+	return active;
 }
 
 bool DirectorSound::assertChannel(int soundChannel) {
@@ -782,9 +785,13 @@ void DirectorSound::processCuePoints() {
 
 				debugC(5, kDebugSound, "DirectorSound::processCuePoints(): cue point %d reached on channel %d", cuePoint, it._key);
 
-				_window->getCurrentMovie()->processEvent(kEventCuePassed, i);
-
 				channel->lastCuePointIndex = i;
+
+				Common::Array<Datum> args;
+				args.push_back(Datum(it._key));
+				args.push_back(Datum((int)i + 1));
+				args.push_back(Datum(soundCast->_cuePointNames[i]));
+				_window->getCurrentMovie()->processEvent(kEventCuePassed, args);
 			}
 		}
 	}

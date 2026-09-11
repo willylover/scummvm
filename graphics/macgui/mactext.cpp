@@ -52,7 +52,10 @@ const Font *MacFontRun::getFont() {
 
 	MacFont macFont = MacFont(fontId, fontSize, textSlant);
 
-	font = wm->_fontMan->getFont(macFont);
+	font = wm->_fontMan->getFont(&macFont);
+	// Font lookup may select a fallback with a different byte encoding.
+	// Retain its resolved ID so text is encoded for the font actually drawn.
+	fontId = macFont.getId();
 
 	return font;
 }
@@ -294,8 +297,8 @@ void MacText::init(uint32 fgcolor, uint32 bgcolor, int maxWidth, TextAlign textA
 MacText::~MacText() {
 	if (_wm->getActiveWidget() == this)
 		_wm->setActiveWidget(nullptr);
-
-	g_system->getTimerManager()->removeTimerProc(&cursorTimerHandler);
+	else if (_active)
+		g_system->getTimerManager()->removeTimerProc(&cursorTimerHandler);
 
 	_borderSurface.free();
 	_borderMaskSurface.free();
@@ -452,6 +455,7 @@ void MacText::enforceTextFont(uint16 fontId) {
 	for (uint i = 0; i < _canvas._text.size(); i++) {
 		for (uint j = 0; j < _canvas._text[i].chunks.size(); j++) {
 			_canvas._text[i].chunks[j].fontId = fontId;
+			_canvas._text[i].chunks[j].font = nullptr;
 		}
 	}
 
@@ -464,6 +468,7 @@ void MacText::setTextSize(int textSize) {
 	for (uint i = 0; i < _canvas._text.size(); i++) {
 		for (uint j = 0; j < _canvas._text[i].chunks.size(); j++) {
 			_canvas._text[i].chunks[j].fontSize = textSize;
+			_canvas._text[i].chunks[j].font = nullptr;
 		}
 	}
 
@@ -516,6 +521,7 @@ void MacText::setTextColor(uint32 color, uint32 start, uint32 end) {
 
 void setTextSizeCallback(MacFontRun &macFontRun, int textSize) {
 	macFontRun.fontSize = textSize;
+	macFontRun.font = nullptr;
 }
 
 void MacText::setTextSize(int textSize, int start, int end) {
@@ -580,6 +586,7 @@ void MacText::setTextChunks(int start, int end, int param, void (*callback)(MacF
 
 void setTextFontCallback(MacFontRun &macFontRun, int fontId) {
 	macFontRun.fontId = fontId;
+	macFontRun.font = nullptr;
 }
 
 void MacText::setTextFont(int fontId, int start, int end) {
@@ -588,6 +595,7 @@ void MacText::setTextFont(int fontId, int start, int end) {
 
 void setTextSlantCallback(MacFontRun &macFontRun, int textSlant) {
 	macFontRun.textSlant = textSlant;
+	macFontRun.font = nullptr;
 }
 
 void MacText::setTextSlant(int textSlant, int start, int end) {
@@ -598,6 +606,7 @@ void MacText::enforceTextSlant(int textSlant) {
 	for (uint i = 0; i < _canvas._text.size(); i++) {
 		for (uint j = 0; j < _canvas._text[i].chunks.size(); j++) {
 			_canvas._text[i].chunks[j].textSlant = textSlant;
+			_canvas._text[i].chunks[j].font = nullptr;
 		}
 	}
 
@@ -745,16 +754,29 @@ void MacText::setActive(bool active) {
 	if (_active == active)
 		return;
 
+	// TimerManager identifies timers by callback, shared by all MacText
+	// instances. An inactive widget must not cancel the active widget's caret.
+	if (_active)
+		g_system->getTimerManager()->removeTimerProc(&cursorTimerHandler);
+
 	MacWidget::setActive(active);
 
-	g_system->getTimerManager()->removeTimerProc(&cursorTimerHandler);
 	if (_active && _editable) {
-		g_system->getTimerManager()->installTimerProc(&cursorTimerHandler, 200000, this, "macEditableText");
+		g_system->getTimerManager()->installTimerProc(&cursorTimerHandler, 500000, this, "macEditableText");
 
 		if (_autoSelect) {
-			// inactive -> active, we reset the selection
+			// Equal selection bounds represent an insertion point. Establish the
+			// cursor directly instead of briefly treating it as selected text.
 			setSelection(_selStart, true);
-			setSelection(_selEnd, false);
+			if (_selStart == _selEnd) {
+				_cursorRow = _selectedText.startRow;
+				_cursorCol = _selectedText.startCol;
+				_selectedText.startY = _selectedText.endY = -1;
+				updateCursorPos();
+				_cursorState = true;
+			} else {
+				setSelection(_selEnd, false);
+			}
 		}
 	} else {
 		// clear the selection and cursor
@@ -1056,16 +1078,14 @@ bool MacText::draw(bool forceRedraw) {
 
 	Common::Point offset(calculateOffset());
 
-	// if we are drawing the selection text or we are selecting, then we don't draw the cursor
-	if (!((_inTextSelection || _selectedText.endY != -1) && _active)) {
-		if (!_cursorState)
-			_composeSurface->blitFrom(*_cursorSurface2, *_cursorRect, Common::Point(_cursorX + offset.x, _cursorY + offset.y));
-		else
-			_composeSurface->blitFrom(*_cursorSurface, *_cursorRect, Common::Point(_cursorX + offset.x, _cursorY + offset.y));
-	}
-
-	if (!(_contentIsDirty || forceRedraw))
+	if (!(_contentIsDirty || forceRedraw)) {
+		// A timer-only update changes just the insertion cursor.
+		if (!((_inTextSelection || _selectedText.endY != -1) && _active)) {
+			ManagedSurface *cursor = _cursorState ? _cursorSurface : _cursorSurface2;
+			_composeSurface->blitFrom(*cursor, *_cursorRect, Common::Point(_cursorX + offset.x, _cursorY + offset.y));
+		}
 		return true;
+	}
 
 	draw(_composeSurface, 0, _scrollPos, _canvas._surface->w, _canvas._surface->h, offset.x, offset.y);
 
@@ -1081,6 +1101,13 @@ bool MacText::draw(bool forceRedraw) {
 
 	if (_selectedText.endY != -1)
 		drawSelection(offset.x, offset.y);
+
+	// Draw the insertion cursor after refreshing the text and background so a
+	// full content update (including the first draw and typing) cannot erase it.
+	if (!((_inTextSelection || _selectedText.endY != -1) && _active)) {
+		ManagedSurface *cursor = _cursorState ? _cursorSurface : _cursorSurface2;
+		_composeSurface->blitFrom(*cursor, *_cursorRect, Common::Point(_cursorX + offset.x, _cursorY + offset.y));
+	}
 
 	_contentIsDirty = false;
 
@@ -1173,14 +1200,7 @@ void MacText::drawSelection(int xoff, int yoff) {
 	int maxSelectionHeight = getDimensions().height() - _border - _gutter / 2;
 	int maxSelectionWidth = getDimensions().width() - _border - _gutter;
 
-	if (s.endCol == _canvas.getLineCharWidth(s.endRow))
-		s.endX = maxSelectionWidth;
-
 	end = MIN((int)maxSelectionHeight, end);
-
-	// if we are selecting all text, then we invert the whole area
-	if ((uint)s.endRow == _canvas._text.size() - 1)
-		end = maxSelectionHeight;
 
 	int numLines = 0;
 	int x1 = 0, x2 = maxSelectionWidth;
@@ -1272,8 +1292,12 @@ void MacText::clearSelection() {
 uint MacText::getSelectionIndex(bool start) {
 	int pos = 0;
 
-	if (!_inTextSelection && (_selectedText.startY < 0 && _selectedText.endY < 0))
+	if (!_inTextSelection && (_selectedText.startY < 0 && _selectedText.endY < 0)) {
+		for (int row = 0; row < _cursorRow; row++)
+			pos += _canvas.getLineCharWidth(row);
+		pos += _cursorCol;
 		return pos;
+	}
 
 	if (start) {
 		for (int row = 0; row < _selectedText.startRow; row++)

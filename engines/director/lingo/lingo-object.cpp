@@ -656,6 +656,11 @@ Symbol ScriptContext::define(const Common::String &name, ScriptData *code, Commo
 Symbol ScriptContext::getMethod(const Common::String &methodName) {
 	Symbol sym;
 
+	if (_disposed) {
+		warning("Method '%s' called on disposed object <%s>, returning VOID", methodName.c_str(), asString().c_str());
+		return sym;
+	}
+
 	if (_functionHandlers.contains(methodName)) {
 		sym = _functionHandlers[methodName];
 		sym.target = this;
@@ -680,9 +685,6 @@ Symbol ScriptContext::getMethod(const Common::String &methodName) {
 }
 
 bool ScriptContext::hasProp(const Common::String &propName) {
-	if (_disposed) {
-		error("Property '%s' accessed on disposed object <%s>", propName.c_str(), Datum(this).asString(true).c_str());
-	}
 	if (_properties.contains(propName)) {
 		return true;
 	}
@@ -702,9 +704,6 @@ bool ScriptContext::hasProp(const Common::String &propName) {
 }
 
 Datum ScriptContext::getProp(const Common::String &propName) {
-	if (_disposed) {
-		error("Property '%s' accessed on disposed object <%s>", propName.c_str(), Datum(this).asString(true).c_str());
-	}
 	if (_properties.contains(propName)) {
 		return _properties[propName];
 	}
@@ -740,9 +739,6 @@ uint32 ScriptContext::getPropCount() {
 }
 
 void ScriptContext::setProp(const Common::String &propName, const Datum &value, bool force) {
-	if (_disposed) {
-		error("Property '%s' accessed on disposed object <%s>", propName.c_str(), Datum(this).asString(true).c_str());
-	}
 	if (_properties.contains(propName)) {
 		_properties[propName] = value;
 		return;

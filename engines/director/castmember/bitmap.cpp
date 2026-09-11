@@ -62,6 +62,7 @@ BitmapCastMember::BitmapCastMember(Cast *cast, uint16 castId, Common::SeekableRe
 	_external = false;
 	_editVersion = 0;
 	_updateFlags = 0;
+	_alphaThreshold = 0;
 	_version = version;
 
 	if (debugChannelSet(5, kDebugLoading)) {
@@ -196,7 +197,10 @@ BitmapCastMember::BitmapCastMember(Cast *cast, uint16 castId, Common::SeekableRe
 		_regY = stream.readUint16();
 		_regX = stream.readUint16();
 
-		_updateFlags = stream.readByte();
+		// D6 permits a compact 22-byte record for monochrome bitmaps. It
+		// ends at regX and omits updateFlags as well as the colour tail.
+		if (stream.pos() < stream.size())
+			_updateFlags = stream.readByte();
 
 		// 22 bytes
 		// This is color image flag
@@ -266,6 +270,7 @@ BitmapCastMember::BitmapCastMember(Cast *cast, uint16 castId, Image::ImageDecode
 	_external = false;
 	_editVersion = 0;
 	_updateFlags = 0;
+	_alphaThreshold = 0;
 
 	_version = g_director->getVersion();
 }
@@ -295,6 +300,7 @@ BitmapCastMember::BitmapCastMember(Cast *cast, uint16 castId, BitmapCastMember &
 	_ditheredTargetClut = source._ditheredTargetClut;
 	_editVersion = source._editVersion;
 	_updateFlags = source._updateFlags;
+	_alphaThreshold = source._alphaThreshold;
 	_scrollPoint = source._scrollPoint;
 
 	_bitsPerPixel = source._bitsPerPixel;
@@ -952,10 +958,13 @@ Datum BitmapCastMember::getField(int field) {
 		d = _bitsPerPixel;
 		break;
 	case kTheRegPoint:
+		{
+		Common::Point regPoint = getRegistrationOffset();
 		d.type = POINT;
 		d.u.farr = new FArray;
-		d.u.farr->arr.push_back(_regX);
-		d.u.farr->arr.push_back(_regY);
+		d.u.farr->arr.push_back(regPoint.x);
+		d.u.farr->arr.push_back(regPoint.y);
+		}
 		break;
 	case kThePalette:
 		// D5 and below return an integer for this field
@@ -1031,8 +1040,8 @@ void BitmapCastMember::setField(int field, const Datum &d) {
 		if (d.type == POINT || (d.type == ARRAY && d.u.farr->arr.size() >= 2)) {
 			Score *score = g_director->getCurrentMovie()->getScore();
 			score->invalidateRectsForMember(this);
-			_regX = d.u.farr->arr[0].asInt();
-			_regY = d.u.farr->arr[1].asInt();
+			_regX = d.u.farr->arr[0].asInt() + _initialRect.left;
+			_regY = d.u.farr->arr[1].asInt() + _initialRect.top;
 			_modified = true;
 		} else {
 			warning("BitmapCastMember::setField(): Wrong Datum type %d for kTheRegPoint", d.type);

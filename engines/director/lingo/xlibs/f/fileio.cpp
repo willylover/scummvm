@@ -396,7 +396,10 @@ void FileIO::m_openFile(int nargs) {
 	Common::String option;
 	switch (mode) {
 	case 0:
-		option = "append";
+		// FileIO mode 0 is read/write. The current stream abstraction does not
+		// yet expose both sides at once, but it must at least remain readable;
+		// treating it as append makes readFile() return an empty string.
+		option = "read";
 		break;
 	case 1:
 		option = "read";

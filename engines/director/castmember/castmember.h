@@ -204,10 +204,9 @@ struct CastMemberInfo {
 	Common::String comments;	// 20     (removed on protecting, but could be retained)
 	uint32 imageQuality;		// 21
 
-	CastMemberInfo() : autoHilite(false), scriptId(0) {
+	CastMemberInfo() : unk1(0), unk2(0), flags(0), count(0), autoHilite(false), isExternal(false), scriptId(0) {
 		memset(xtraGuid, 0, 16);
 		memset(guid, 0, 16);
-		isExternal = false;
 		creationTime = 0;
 		modifiedTime = 0;
 		imageQuality = 0;

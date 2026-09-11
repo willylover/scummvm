@@ -72,6 +72,7 @@ struct InfoEntry {
 	}
 
 	Common::String readString(bool pascal = true);
+	Common::String readString(Cast *cast, bool pascal = true);
 	void writeString(Common::String string, bool pascal = true);
 };
 
@@ -138,11 +139,13 @@ public:
 	// lingo/lingo-events.cpp
 	bool processSysEvent(Common::Event &event);
 	void broadcastEvent(LEvent event);
+	void broadcastEvent(LEvent event, const Common::Array<Datum> &args);
 
 	// lingo/lingo-events.cpp
 	void setPrimaryEventHandler(LEvent event, const Common::String &code);
 	void resolveScriptEvent(LingoEvent &event);
 	void processEvent(LEvent event, int targetId = 0);
+	void processEvent(LEvent event, const Common::Array<Datum> &args);
 	void queueInputEvent(LEvent event, int targetId = 0, Common::Point pos = Common::Point(-1, -1));
 	bool processInputEvent(LEvent event, int targetId = 0, Common::Point pos = Common::Point(-1, -1));
 

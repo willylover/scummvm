@@ -360,10 +360,19 @@ bool Sprite::respondsToMouse() {
 	if (_cast && _cast->_type == kCastMovie)
 		return ((MovieCastMember *)_cast)->_enableScripts;
 
-	// TODO: Check if we need to check against individual events like below
 	if (g_director->getVersion() >= 600) {
-		if (_behaviors.size() > 0)
-			return true;
+		for (const BehaviorElement &behavior : _behaviors) {
+			ScriptContext *script = _movie->getScriptContext(kScoreScript, behavior.memberID);
+			if (script && (script->_eventHandlers.contains(kEventMouseDown) ||
+					script->_eventHandlers.contains(kEventMouseUp) ||
+					script->_eventHandlers.contains(kEventRightMouseDown) ||
+					script->_eventHandlers.contains(kEventRightMouseUp) ||
+					script->_eventHandlers.contains(kEventMouseEnter) ||
+					script->_eventHandlers.contains(kEventMouseLeave) ||
+					script->_eventHandlers.contains(kEventMouseWithin) ||
+					script->_eventHandlers.contains(kEventMouseUpOutSide)))
+				return true;
+		}
 	}
 
 	ScriptContext *spriteScript = _movie->getScriptContext(kScoreScript, _scriptId);
@@ -513,8 +522,12 @@ Common::Rect Sprite::getBbox(bool unstretched) {
 	Common::Rect result(_width, _height);
 	// If this is a cast member, use the cast member's getBbox function
 	// so we start with a rect containing the correct registration offset.
-	if (_cast)
-		result = _cast->getBbox(_width, _height);
+	if (_cast) {
+		if (unstretched)
+			result = _cast->getBbox();
+		else
+			result = _cast->getBbox(_width, _height);
+	}
 
 	// The origin of the rect should be at the registration offset,
 	// e.g. for bitmap sprites this defaults to the centre.
@@ -628,7 +641,15 @@ void Sprite::setCast(CastMemberID memberID, bool replaceDims) {
 			Common::Rect dims = _cast->getInitialRect();
 			switch (_cast->_type) {
 			case kCastShape:
+				break;
 			case kCastText:
+				// Authored text sprites use their score rectangle for wrapping and
+				// alignment. A zero-sized channel has no authored rectangle; when
+				// Lingo assigns a field to one, Director uses the member rectangle.
+				if (_width <= 0 || _height <= 0) {
+					_width = dims.width();
+					_height = dims.height();
+				}
 				break;
 			case kCastDigitalVideo:
 				// A video the score sizes to 0x0 is intentionally invisible (a

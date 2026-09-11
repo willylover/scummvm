@@ -50,7 +50,15 @@ Stxt::Stxt(Cast *cast, Common::SeekableReadStreamEndian &textStream) : _cast(cas
 	}
 	uint32 strLen = textStream.readUint32();
 	uint32 dataLen = textStream.readUint32();
-	Common::String text = textStream.readString(0, strLen);
+	// strLen is authoritative. STXT members may contain arbitrary byte data;
+	// Director titles also use text members as compact lookup tables. Using a
+	// NUL-terminated read here consumed all strLen bytes but discarded the first
+	// NUL and everything following it.
+	Common::Array<char> textBytes;
+	textBytes.resize(strLen);
+	if (strLen)
+		textStream.read(textBytes.data(), strLen);
+	Common::String text(strLen ? textBytes.data() : "", strLen);
 	debugC(3, kDebugText, "Stxt init: offset: %d strLen: %d dataLen: %d textlen: %u", offset, strLen, dataLen, text.size());
 
 	// TODO: Before applying formatting and decoding the text to a U32String,
@@ -73,7 +81,7 @@ Stxt::Stxt(Cast *cast, Common::SeekableReadStreamEndian &textStream) : _cast(cas
 	Common::U32String logText;
 
 	while (formattingCount) {
-		uint16 currentFont = _style.fontId;
+		uint16 currentFont = _style.originalFontId;
 		_style.read(textStream, _cast);
 
 		assert(prevPos <= _style.formatStartOffset);  // If this is triggered, we have to implement sorting
@@ -81,7 +89,7 @@ Stxt::Stxt(Cast *cast, Common::SeekableReadStreamEndian &textStream) : _cast(cas
 		Common::String textPart;
 		while (prevPos != _style.formatStartOffset) {
 			char f = text.firstChar();
-			textPart += f;
+			textPart.append(&f, &f + 1);
 			text.deleteChar(0);
 
 			if (f == '\001')	// Insert two \001s as a replacement
@@ -90,8 +98,7 @@ Stxt::Stxt(Cast *cast, Common::SeekableReadStreamEndian &textStream) : _cast(cas
 			prevPos++;
 		}
 		_rtext += textPart;
-		Common::CodePage encoding = detectFontEncoding(cast->_platform, currentFont);
-		Common::U32String u32TextPart(textPart, encoding);
+		Common::U32String u32TextPart = cast->decodeTextString(textPart, currentFont);
 		_ptext += u32TextPart;
 		_ftext += u32TextPart;
 		logText += Common::toPrintable(u32TextPart);
@@ -104,8 +111,7 @@ Stxt::Stxt(Cast *cast, Common::SeekableReadStreamEndian &textStream) : _cast(cas
 	}
 
 	_rtext += text;
-	Common::CodePage encoding = detectFontEncoding(cast->_platform, _style.fontId);
-	Common::U32String u32Text(text, encoding);
+	Common::U32String u32Text = cast->decodeTextString(text, _style.originalFontId);
 	_ptext += u32Text;
 	_ftext += u32Text;
 	logText += Common::toPrintable(u32Text);
@@ -119,6 +125,7 @@ FontStyle::FontStyle() {
 	ascent = 0;
 
 	fontId = 0;
+	originalFontId = 0;
 	textSlant = 0;
 
 	fontSize = 12;
@@ -131,7 +138,7 @@ void FontStyle::read(Common::ReadStreamEndian &stream, Cast *cast) {
 	uint16 originalHeight = height = stream.readUint16();
 	ascent = stream.readUint16();
 
-	uint16 originalFontId = fontId = stream.readUint16();
+	originalFontId = fontId = stream.readUint16();
 	textSlant = stream.readByte();
 	stream.readByte(); // padding
 	fontSize = stream.readUint16();

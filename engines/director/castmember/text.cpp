@@ -38,8 +38,8 @@
 
 namespace Director {
 
-TextCastMember::TextCastMember(Cast *cast, uint16 castId, Common::SeekableReadStreamEndian &stream, uint16 version, uint8 flags1, bool asButton)
-		: CastMember(cast, castId, stream) {
+TextCastMember::TextCastMember(Cast *cast, uint16 castId)
+	: CastMember(cast, castId) {
 	_type = kCastText;
 
 	_borderSize = 0;
@@ -65,6 +65,16 @@ TextCastMember::TextCastMember(Cast *cast, uint16 castId, Common::SeekableReadSt
 
 	// seems like the line spacing is default to 1 in D4
 	_lineSpacing = g_director->getVersion() >= 400 ? 1 : 0;
+
+	_height = _ascent = 0;
+	_needsReload = false;
+	_loaded = true;
+}
+
+TextCastMember::TextCastMember(Cast *cast, uint16 castId, Common::SeekableReadStreamEndian &stream, uint16 version, uint8 flags1, bool asButton)
+	: TextCastMember(cast, castId) {
+	_size = stream.size();
+	_loaded = false;
 
 	if (debugChannelSet(4, kDebugLoading)) {
 		stream.hexdump(stream.size());
@@ -299,7 +309,8 @@ bool textWindowCallback(Graphics::WindowClick click, Common::Event &event, void 
 Graphics::MacWidget *TextCastMember::createWindowOrWidget(Common::Rect &bbox, Common::Rect dims, Graphics::MacFont *macFont) {
 	Graphics::MacText *widget = nullptr;
 
-	int maxWidth = _initialRect.width() + _borderSize * 2 + _gutterSize * 2 + _boxShadow;
+	int textWidth = _textType == kTextTypeFixed ? dims.width() : _initialRect.width();
+	int maxWidth = textWidth + _borderSize * 2 + _gutterSize * 2 + _boxShadow;
 	widget = new Graphics::MacText(g_director->getCurrentWindow()->getMacWindow(), bbox.left, bbox.top, dims.width(), dims.height(), g_director->_wm, _ftext, macFont, getForeColor(), getBackColor(), maxWidth, getAlignment(), _lineSpacing, _borderSize, _gutterSize, _boxShadow, _textShadow, _textType == kTextTypeFixed || _textType == kTextTypeScrolling, _textType == kTextTypeScrolling);
 	widget->setSelRange(g_director->getCurrentMovie()->_selStart, g_director->getCurrentMovie()->_selEnd);
 	widget->draw();
@@ -328,8 +339,9 @@ Graphics::MacWidget *TextCastMember::createWidget(Common::Rect &bbox, Channel *c
 		if (_textType == kTextTypeAdjustToFit) {
 			dims.right = MIN<int>(dims.right, dims.left + _initialRect.width());
 			dims.bottom = MIN<int>(dims.bottom, dims.top + _initialRect.height());
-		} else if (_textType == kTextTypeFixed || _textType == kTextTypeScrolling) {
-			// use initialRect to create widget for fixed style text, this maybe related to version.
+		} else if (_textType == kTextTypeScrolling) {
+			// Scrolling text needs its complete source area. Fixed text uses the
+			// score sprite's rectangle, which controls wrapping and alignment.
 			dims.right = MAX<int>(dims.right, dims.left + _initialRect.width());
 			dims.bottom = MAX<int>(dims.bottom, dims.top + MAX<int>(_initialRect.height(), _maxHeight));
 		}
@@ -338,8 +350,9 @@ Graphics::MacWidget *TextCastMember::createWidget(Common::Rect &bbox, Channel *c
 			((Graphics::MacText *)widget)->setEditable(channel->_sprite->_editable || _editable);
 		}
 
-		// since we disable the ability of setActive in setEdtiable, then we need to set active widget manually
-		if (channel->_sprite->_editable || _editable) {
+		// Cast-member editability makes the field capable of editing. Only the
+		// score sprite's editableText flag gives it keyboard focus.
+		if (channel->_sprite->_editable) {
 			Graphics::MacWidget *activeWidget = g_director->_wm->getActiveWidget();
 			if (activeWidget == nullptr || !activeWidget->isEditable())
 				g_director->_wm->setActiveWidget(widget);
@@ -445,13 +458,15 @@ int TextCastMember::getLineHeight(int line) {
 	return 0;
 }
 
-// D4 dictionary book said this is line spacing
 int TextCastMember::getTextHeight() {
 	Graphics::MacText *target = getWidget();
 	if (target) {
-		return target->getLineSpacing();
+		// Director's textHeight is the vertical advance between text lines. The
+		// MacText canvas advances by the larger of the rendered line height and
+		// its configured interlinear value.
+		return MAX(target->getLineHeight(0), target->getLineSpacing());
 	}
-	return _lineSpacing;
+	return MAX<int>(_textHeight / 16, _lineSpacing);
 }
 
 Common::String TextCastMember::getTextFont() {
@@ -587,10 +602,23 @@ void TextCastMember::setTextStyle(const Common::String &textStyle, int start, in
 }
 
 void TextCastMember::updateFromWidget(Graphics::MacWidget *widget, bool spriteEditable) {
-	if (widget && (spriteEditable || _editable)) {
-		Common::String content = ((Graphics::MacText *)widget)->getEditedString();
+	// Only the focused editor is a source of user changes. An inactive field may
+	// still be editable at cast-member level, but copying its stale widget text
+	// back would overwrite a value just assigned by Lingo.
+	if (widget && widget->_active && (spriteEditable || _editable)) {
+		Graphics::MacText *textWidget = (Graphics::MacText *)widget;
+		Common::String content = textWidget->getEditedString();
 		content.replace('\n', '\r');
 		_ptext = content;
+
+		// Preserve the live insertion point if Lingo assigns a cleaned version of
+		// the text during this key event. A replacement widget is initialized from
+		// the movie selection range.
+		Movie *movie = g_director->getCurrentMovie();
+		if (movie) {
+			movie->_selStart = textWidget->getSelectionIndex(true);
+			movie->_selEnd = textWidget->getSelectionIndex(false);
+		}
 
 		// This string will be formatted with the default formatting
 		Common::String format = Common::String::format("\001\016%04x%02x%04x%04x%04x%04x", _fontId, _textSlant, _fontSize, _fgpalinfo1, _fgpalinfo2, _fgpalinfo2);
@@ -1005,29 +1033,28 @@ uint32 TextCastMember::writeSTXTResource(Common::SeekableWriteStream *writeStrea
 	debugC(3, kDebugSaving, "writeSTXTResource(): _ptext: %s\n_ftext = %s\n_rtext: %s",
 		_ptext.encode().c_str(), Common::toPrintable(_ftext).encode().c_str(), Common::toPrintable(_rtext).c_str());
 
-	uint32 stxtSize = getSTXTResourceSize() + 8;
+	Common::String rawText = encodeSTXTText();
+	uint32 stxtSize = 12 + rawText.size() + getFormattingCount() * 20 + 2;
 
 	writeStream->seek(offset);
 
 	writeStream->writeUint32LE(MKTAG('S', 'T', 'X', 'T'));
-	writeStream->writeUint32LE(getSTXTResourceSize());						// Size of the STXT resource without the header and size
+	writeStream->writeUint32LE(stxtSize);						// Size of the STXT resource without the header and size
 
 	writeStream->writeUint32BE(12);							// This is the offset, if it's not 12, we throw an error, other offsets are not handled
 
 	int8 formatting = getFormattingCount();
 
-	writeStream->writeUint32BE(_ptext.size());		// Length of the string
+	writeStream->writeUint32BE(rawText.size());		// Encoded byte length of the string
 	// Encode only in one format, original may be encoded in multiple formats
 	// Size of one Font Style is 20 + The number of encodings takes 2 bytes
 	writeStream->writeUint32BE(20 * formatting + 2);				// Data Length
 
 	uint64 textPos = writeStream->pos();
-	writeStream->seek(_ptext.size(), SEEK_CUR);
+	writeStream->seek(rawText.size(), SEEK_CUR);
 	writeStream->writeUint16BE(formatting);
 
 	FontStyle style;
-	Common::String rawText;
-
 	uint32 it = 0;
 	uint32 pIndex = 0;
 
@@ -1037,9 +1064,6 @@ uint32 TextCastMember::writeSTXTResource(Common::SeekableWriteStream *writeStrea
 				// Styling header found
 				debugC(3, kDebugSaving, "Format start offset: %d, text: %s", style.formatStartOffset,
 					Common::toPrintable(_ptext.substr(style.formatStartOffset, pIndex - style.formatStartOffset)).encode().c_str());
-
-				Common::CodePage encoding = detectFontEncoding(_cast->_platform, style.fontId);
-				rawText += _ptext.substr(style.formatStartOffset, pIndex - style.formatStartOffset).encode(encoding);
 
 				debugC(3, kDebugSaving, "Formatting: %s", Common::toPrintable(_ftext.substr(it, 22)).encode().c_str());
 				it += 2;
@@ -1076,15 +1100,11 @@ uint32 TextCastMember::writeSTXTResource(Common::SeekableWriteStream *writeStrea
 		// Because we iterate over _ftext.size() - 1
 		pIndex += 1;
 	} else {
-		pIndex = _ptext.size() - 1;
+		pIndex = _ptext.size();
 	}
 
 	debugC(3, kDebugSaving, "format start offset: %d, text: %s", style.formatStartOffset,
 		Common::toPrintable(_ptext.substr(style.formatStartOffset, pIndex - style.formatStartOffset)).encode().c_str());
-
-	Common::CodePage encoding = detectFontEncoding(_cast->_platform, style.fontId);
-	_ptext.substr(style.formatStartOffset, pIndex - style.formatStartOffset).encode(encoding);
-	rawText += _ptext.substr(style.formatStartOffset, pIndex - style.formatStartOffset).encode(encoding);
 
 	uint64 currentPos = writeStream->pos();
 	writeStream->seek(textPos);
@@ -1112,7 +1132,44 @@ uint32 TextCastMember::writeSTXTResource(Common::SeekableWriteStream *writeStrea
 
 uint32 TextCastMember::getSTXTResourceSize() {
 	// Header (offset, string length, data length) + text string + data (FontStyle)
-	return 12 + _ptext.size() + getFormattingCount() * 20 + 2;
+	return 12 + encodeSTXTText().size() + getFormattingCount() * 20 + 2;
+}
+
+Common::String TextCastMember::encodeSTXTText() {
+	Common::String rawText;
+	uint16 fontId = 0;
+	uint32 formatStart = 0;
+	uint32 pIndex = 0;
+	uint32 it = 0;
+
+	while (!_ftext.empty() && it + 1 < _ftext.size()) {
+		if (_ftext[it] == '\001' && _ftext[it + 1] == '\016') {
+			rawText += _ptext.substr(formatStart, pIndex - formatStart).encode(
+				detectFontEncoding(_cast->_platform, fontId));
+			it += 2;
+			if (it + 22 > _ftext.size())
+				break;
+
+			const Common::u32char_type_t *s = _ftext.substr(it, 22).c_str();
+			s = Graphics::readHex(&fontId, s, 4);
+			formatStart = pIndex;
+			it += 22;
+			continue;
+		}
+		pIndex++;
+		it++;
+	}
+
+	if (_ftext.empty())
+		pIndex = _ptext.size();
+	else if (it < _ftext.size())
+		pIndex++;
+	if (pIndex > _ptext.size())
+		pIndex = _ptext.size();
+
+	rawText += _ptext.substr(formatStart, pIndex - formatStart).encode(
+		detectFontEncoding(_cast->_platform, fontId));
+	return rawText;
 }
 
 uint8 TextCastMember::getFormattingCount() {

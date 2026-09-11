@@ -85,7 +85,8 @@ void U32String::decodeUTF8(const char *src, uint32 len) {
 			break;
 		}
 
-		operator+=(chr);
+		u32char_type_t decoded = chr;
+		append(&decoded, &decoded + 1);
 	}
 }
 
@@ -907,7 +908,7 @@ StringEncodingResult String::encodeUTF8(const U32String &src, char errorChar) {
 			break;
 		}
 
-		operator+=(pBytes);
+		append(pBytes, pBytes + bytesToWrite);
 	}
 
 	return kStringEncodingResultSucceeded;
@@ -975,8 +976,10 @@ encodeUTF16Template(BE, WRITE_BE_UINT16)
 encodeUTF16Template(LE, WRITE_LE_UINT16)
 encodeUTF16Template(Native, WRITE_UINT16)
 
-// Upper bound on unicode codepoint in any single-byte encoding. Must be divisible by 0x100 and be strictly above large codepoint
-static const int kMaxCharSingleByte = 0x3000;
+// Upper bound on Unicode codepoints represented by the bundled single-byte
+// tables. MacRoman includes the private-use Apple logo at U+F8FF.
+// Keep this divisible by 0x100 and strictly above every mapped codepoint.
+static const int kMaxCharSingleByte = 0x10000;
 
 static const uint16 *
 getConversionTable(CodePage page) {
@@ -1077,7 +1080,8 @@ void U32String::decodeOneByte(const char *src, uint32 len, CodePage page) {
 
 	for (uint i = 0; i < len; ++i) {
 		if ((src[i] & 0x80) == 0) {
-			operator+=(src[i]);
+			u32char_type_t val = (byte)src[i];
+			append(&val, &val + 1);
 			continue;
 		}
 
@@ -1098,7 +1102,8 @@ StringEncodingResult String::encodeOneByte(const U32String &src, CodePage page, 
 		for (uint i = 0; i < src.size(); ++i) {
 			uint32 c = src[i];
 			if (c <= 0x7F) {
-				operator+=((char)c);
+				char val = (char)c;
+				append(&val, &val + 1);
 				continue;
 			}
 

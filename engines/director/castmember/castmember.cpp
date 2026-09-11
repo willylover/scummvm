@@ -231,8 +231,13 @@ Datum CastMember::getField(int field) {
 		}
 		break;
 	case kTheRect:
-		// not sure get the initial rect would be fine to castmember
-		d = Datum(_cast->getCastMember(_castId)->_initialRect);
+		// A cast member's rect is expressed in its own coordinate system.
+		// Bitmap resources may retain a non-zero origin from Director's editing
+		// canvas, but that origin is not part of the Lingo-visible member rect.
+		{
+			Common::Rect initialRect = _cast->getCastMemberInitialRect(_castId);
+			d = Datum(Common::Rect(0, 0, initialRect.width(), initialRect.height()));
+		}
 		break;
 	/*
 	ScummVM does not do preloading so we will always return false here.
@@ -304,6 +309,7 @@ void CastMember::setField(int field, const Datum &d) {
 			return;
 		}
 		castInfo->name = d.asString();
+		castInfo->count = MAX<uint16>(castInfo->count, 2);
 		setModified(true);
 		_cast->rebuildCastNameCache();
 		return;

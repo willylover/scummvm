@@ -27,6 +27,7 @@
 #include "graphics/macgui/macwindowmanager.h"
 
 #include "director/director.h"
+#include "director/frame.h"
 #include "director/archive.h"
 #include "director/cast.h"
 #include "director/debugger.h"
@@ -429,8 +430,15 @@ void Window::setModal(bool modal) {
 }
 
 void Window::setFileName(Common::String filename) {
+	bool movieAlreadyLoaded = _currentMovie != nullptr;
 	setNextMovie(filename);
-	ensureMovieIsLoaded();
+	// Replacing a movie in an existing MIAW can happen from another window's
+	// event handler. Defer that reload to this window's next regular step so we
+	// do not destroy its score and event tables in the middle of nested Lingo
+	// execution. A newly-created window still needs its first movie now so its
+	// rect and other properties are available before open.
+	if (!movieAlreadyLoaded)
+		ensureMovieIsLoaded();
 }
 
 void Window::reset() {
@@ -502,17 +510,35 @@ void Window::setVisible(bool visible, bool silent) {
 }
 
 void Window::ensureMovieIsLoaded() {
+	Window *previousWindow = g_director->getCurrentWindow();
+	bool switchedWindow = previousWindow != this;
+	if (switchedWindow) {
+		previousWindow->incRefCount();
+		g_director->setCurrentWindow(this);
+		g_lingo->switchStateFromWindow();
+	}
+
 	if (!_currentMovie) {
 		if (_fileName.empty()) {
 			Common::String movieName = getName();
 			setNextMovie(movieName);
 		}
 	} else if (_nextMovie.movie.empty()) { // The movie is loaded and no next movie to load
+		if (switchedWindow) {
+			g_director->setCurrentWindow(previousWindow);
+			previousWindow->decRefCount();
+			g_lingo->switchStateFromWindow();
+		}
 		return;
 	}
 
 	if (_nextMovie.movie.empty()) {
 		warning("Window::ensureMovieIsLoaded(): No movie to load");
+		if (switchedWindow) {
+			g_director->setCurrentWindow(previousWindow);
+			previousWindow->decRefCount();
+			g_lingo->switchStateFromWindow();
+		}
 		return;
 	}
 
@@ -526,6 +552,12 @@ void Window::ensureMovieIsLoaded() {
 
 	if (_currentMovie->getScore()->_playState == kPlayNotStarted)
 		step(); // we will load it here and move to kPlayLoaded state
+
+	if (switchedWindow) {
+		g_director->setCurrentWindow(previousWindow);
+		previousWindow->decRefCount();
+		g_lingo->switchStateFromWindow();
+	}
 }
 
 bool Window::setNextMovie(Common::String &movieFilenameRaw) {
@@ -607,11 +639,6 @@ bool Window::loadNextMovie() {
 
 	Common::Path archivePath = Common::Path(_currentPath, g_director->_dirSeparator);
 	archivePath.appendInPlace(Common::lastPathComponent(_nextMovie.movie, g_director->_dirSeparator));
-
-	if (_currentMovie && archivePath == _currentMovie->getArchive()->getPathName()) {
-		debug(0, "Window::loadNextMovie: next movie '%s' is the same as current movie, skipping load", archivePath.toString(Common::Path::kNativeSeparator).c_str());
-		return true;
-	}
 
 	Cast *previousSharedCast = nullptr;
 	if (_currentMovie) {

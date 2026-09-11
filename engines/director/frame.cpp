@@ -860,6 +860,10 @@ void Frame::readMainChannelsD5(Common::MemoryReadStreamEndian &stream, uint16 of
 			break;
 		case 26:
 			_mainChannels.palette.paletteId.member = stream.readSint16();
+			// Built-in palettes are identified by their negative member ID;
+			// the cast library field is not meaningful and varies between files.
+			if (_mainChannels.palette.paletteId.member < 0)
+				_mainChannels.palette.paletteId.castLib = -1;
 			if (!g_director->hasPalette(_mainChannels.palette.paletteId))
 				_mainChannels.palette.paletteId = CastMemberID();
 			if (!_mainChannels.palette.paletteId.isNull())
@@ -1005,6 +1009,8 @@ void readSpriteDataD5(Common::SeekableReadStreamEndian &stream, Sprite &sprite, 
 			break;
 		case 2: {
 				int castLib = stream.readSint16();
+				if (castLib == -1)
+					castLib = DEFAULT_CAST_LIB;
 				sprite._castId = CastMemberID(sprite._castId.member, castLib);
 				sprite._copyBackMask |= kSCBCastId;
 			}
@@ -1017,6 +1023,8 @@ void readSpriteDataD5(Common::SeekableReadStreamEndian &stream, Sprite &sprite, 
 			break;
 		case 6: {
 				int scriptCastLib = stream.readSint16();
+				if (scriptCastLib == -1)
+					scriptCastLib = DEFAULT_CAST_LIB;
 				sprite._scriptId = CastMemberID(sprite._scriptId.member, scriptCastLib);
 				sprite._copyBackMask |= kSCBCastId;
 			}
@@ -1271,6 +1279,8 @@ void Frame::readMainChannelsD6(Common::MemoryReadStreamEndian &stream, uint16 of
 			break;
 		case 120+2:
 			_mainChannels.palette.paletteId.member = stream.readSint16();
+			if (_mainChannels.palette.paletteId.member < 0)
+				_mainChannels.palette.paletteId.castLib = -1;
 			if (!g_director->hasPalette(_mainChannels.palette.paletteId))
 				_mainChannels.palette.paletteId = CastMemberID();
 			if (!_mainChannels.palette.paletteId.isNull())
@@ -1462,6 +1472,8 @@ void readSpriteDataD6(Common::SeekableReadStreamEndian &stream, Sprite &sprite, 
 			break;
 		case 4: {
 				int castLib = stream.readSint16();
+				if (castLib == -1)
+					castLib = DEFAULT_CAST_LIB;
 				sprite._castId = CastMemberID(sprite._castId.member, castLib);
 				sprite._copyBackMask |= kSCBCastId;
 				debugC(6, kDebugLoading, "    sprite._castId: %d", sprite._castId.member);
@@ -1728,6 +1740,8 @@ void Frame::readMainChannelsD7(Common::MemoryReadStreamEndian &stream, uint16 of
 			break;
 		case 240+2:
 			_mainChannels.palette.paletteId.member = stream.readSint16();
+			if (_mainChannels.palette.paletteId.member < 0)
+				_mainChannels.palette.paletteId.castLib = -1;
 			if (!g_director->hasPalette(_mainChannels.palette.paletteId))
 				_mainChannels.palette.paletteId = CastMemberID();
 			if (!_mainChannels.palette.paletteId.isNull())
@@ -1907,6 +1921,8 @@ void readSpriteDataD7(Common::SeekableReadStreamEndian &stream, Sprite &sprite, 
 		case 4:
 			{
 				int castLib = stream.readSint16();
+				if (castLib == -1)
+					castLib = DEFAULT_CAST_LIB;
 				sprite._castId = CastMemberID(sprite._castId.member, castLib);
 				sprite._copyBackMask |= kSCBCastId;
 			}

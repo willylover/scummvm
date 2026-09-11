@@ -208,6 +208,7 @@ void b_version(int nargs);
 void b_cast(int nargs);
 void b_castLib(int nargs);
 void b_member(int nargs);
+void b_new(int nargs);
 void b_script(int nargs);
 void b_sprite(int nargs);
 void b_window(int nargs);

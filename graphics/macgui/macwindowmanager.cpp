@@ -155,6 +155,68 @@ static const byte macCursorWatch[] = {
 	3, 3, 0, 0, 0, 0, 0, 0, 3, 3, 3,
 	3, 3, 0, 0, 0, 0, 0, 0, 3, 3, 3,
 };
+
+static const byte *getMacCursorMask(const byte *cursor) {
+	static byte mask[11 * 16];
+	for (uint i = 0; i < ARRAYSIZE(mask); i++)
+		mask[i] = cursor[i] == 3 ? kCursorMaskTransparent : kCursorMaskOpaque;
+	return mask;
+}
+
+static void setMacCursor(const byte *cursor, int hotspotX, int hotspotY, bool push) {
+	static uint32 pixels[11 * 16];
+	static const Graphics::PixelFormat format = Graphics::PixelFormat::createFormatRGBA32();
+	for (uint i = 0; i < ARRAYSIZE(pixels); i++) {
+		if (cursor[i] == 3)
+			pixels[i] = format.ARGBToColor(0, 0, 0, 0);
+		else if (cursor[i] == 1)
+			pixels[i] = format.ARGBToColor(255, 255, 255, 255);
+		else
+			pixels[i] = format.ARGBToColor(255, 0, 0, 0);
+	}
+	if (push)
+		CursorMan.pushCursor(pixels, 11, 16, hotspotX, hotspotY, 0, &format, getMacCursorMask(cursor));
+	else
+		CursorMan.replaceCursor(pixels, 11, 16, hotspotX, hotspotY, 0, &format, getMacCursorMask(cursor));
+}
+
+static void setCustomMacCursor(Cursor *cursor, bool push) {
+	const uint width = cursor->getWidth();
+	const uint height = cursor->getHeight();
+	const uint size = width * height;
+	const byte *source = cursor->getSurface();
+	const byte *sourceMask = cursor->getMask();
+	const byte *sourcePalette = cursor->getPalette();
+	const byte paletteStart = cursor->getPaletteStartIndex();
+	const uint16 paletteCount = cursor->getPaletteCount();
+	const byte keyColor = cursor->getKeyColor();
+	Common::Array<uint32> pixels(size);
+	Common::Array<byte> mask(size);
+	static const Graphics::PixelFormat format = Graphics::PixelFormat::createFormatRGBA32();
+
+	for (uint i = 0; i < size; i++) {
+		const byte index = source[i];
+		const bool transparent = index == keyColor ||
+				(sourceMask && sourceMask[i] == kCursorMaskTransparent);
+		mask[i] = transparent ? kCursorMaskTransparent : kCursorMaskOpaque;
+
+		byte r = 0, g = 0, b = 0;
+		if (sourcePalette && index >= paletteStart && index < paletteStart + paletteCount) {
+			const uint paletteIndex = index - paletteStart;
+			r = sourcePalette[paletteIndex * 3];
+			g = sourcePalette[paletteIndex * 3 + 1];
+			b = sourcePalette[paletteIndex * 3 + 2];
+		} else if (index == 1) {
+			r = g = b = 255;
+		}
+		pixels[i] = format.ARGBToColor(transparent ? 0 : 255, r, g, b);
+	}
+
+	if (push)
+		CursorMan.pushCursor(pixels.data(), width, height, cursor->getHotspotX(), cursor->getHotspotY(), 0, &format, mask.data());
+	else
+		CursorMan.replaceCursor(pixels.data(), width, height, cursor->getHotspotX(), cursor->getHotspotY(), 0, &format, mask.data());
+}
 static const byte macCursorCrossBar[] = {
 	3, 3, 3, 0, 0, 0, 0, 3, 3, 3, 3,
 	3, 3, 3, 0, 1, 1, 0, 0, 3, 3, 3,
@@ -1196,7 +1258,7 @@ bool MacWindowManager::processEvent(Common::Event &event) {
 		BaseMacWindow *w = *it;
 		if (_lockedWidget != nullptr && w != _lockedWidget)
 			continue;
-		if (w->hasAllFocus() || (event.type == Common::EVENT_KEYDOWN) ||
+		if (w->hasAllFocus() || (event.type == Common::EVENT_KEYDOWN && w->getId() == _activeWindow) ||
 				(w->isVisible() && w->getDimensions().contains(event.mouse.x, event.mouse.y))) {
 			if ((event.type == Common::EVENT_LBUTTONDOWN || event.type == Common::EVENT_LBUTTONUP) && (!_backgroundWindow || w != _backgroundWindow))
 				setActiveWindow(w->getId());
@@ -1368,26 +1430,23 @@ void MacWindowManager::pushCursor(MacCursorType type, Cursor *cursor) {
 		CursorMan.pushCursorPalette(cursorPalette, 0, 2);
 		break;
 	case kMacCursorArrow:
-		CursorMan.pushCursor(macCursorArrow, 11, 16, 1, 1, 3);
+		setMacCursor(macCursorArrow, 1, 1, true);
 		CursorMan.pushCursorPalette(cursorPalette, 0, 2);
 		break;
 	case kMacCursorBeam:
-		if (g_system->getFeatureState(OSystem::kFeatureCursorMaskInvert))
-			CursorMan.replaceCursor(macCursorBeam, 11, 16, 3, 8, 3, NULL, macCursorBeamMask);
-		else
-			CursorMan.replaceCursor(macCursorBeam, 11, 16, 3, 8, 3);
+		setMacCursor(macCursorBeam, 3, 8, true);
 		CursorMan.pushCursorPalette(cursorPalette, 0, 2);
 		break;
 	case kMacCursorCrossHair:
-		CursorMan.pushCursor(macCursorCrossHair, 11, 16, 5, 5, 3);
+		setMacCursor(macCursorCrossHair, 5, 5, true);
 		CursorMan.pushCursorPalette(cursorPalette, 0, 2);
 		break;
 	case kMacCursorCrossBar:
-		CursorMan.pushCursor(macCursorCrossBar, 11, 16, 4, 4, 3);
+		setMacCursor(macCursorCrossBar, 4, 4, true);
 		CursorMan.pushCursorPalette(cursorPalette, 0, 2);
 		break;
 	case kMacCursorWatch:
-		CursorMan.pushCursor(macCursorWatch, 11, 16, 5, 8, 3);
+		setMacCursor(macCursorWatch, 5, 8, true);
 		CursorMan.pushCursorPalette(cursorPalette, 0, 2);
 		break;
 	case kMacCursorCustom:
@@ -1396,7 +1455,10 @@ void MacWindowManager::pushCursor(MacCursorType type, Cursor *cursor) {
 			return;
 		}
 
-		pushCustomCursor(cursor);
+		setCustomMacCursor(cursor, true);
+		if (cursor->getPalette())
+			CursorMan.pushCursorPalette(cursor->getPalette(), cursor->getPaletteStartIndex(), cursor->getPaletteCount());
+		break;
 	}
 
 	_cursorTypeStack.push(type);
@@ -1409,26 +1471,23 @@ void MacWindowManager::replaceCursor(MacCursorType type, Cursor *cursor) {
 		CursorMan.replaceCursorPalette(cursorPalette, 0, 2);
 		break;
 	case kMacCursorArrow:
-		CursorMan.replaceCursor(macCursorArrow, 11, 16, 1, 1, 3);
+		setMacCursor(macCursorArrow, 1, 1, false);
 		CursorMan.replaceCursorPalette(cursorPalette, 0, 2);
 		break;
 	case kMacCursorBeam:
-		if (g_system->getFeatureState(OSystem::kFeatureCursorMaskInvert))
-			CursorMan.replaceCursor(macCursorBeam, 11, 16, 3, 8, 3, NULL, macCursorBeamMask);
-		else
-			CursorMan.replaceCursor(macCursorBeam, 11, 16, 3, 8, 3);
+		setMacCursor(macCursorBeam, 3, 8, false);
 		CursorMan.replaceCursorPalette(cursorPalette, 0, 2);
 		break;
 	case kMacCursorCrossHair:
-		CursorMan.replaceCursor(macCursorCrossHair, 11, 16, 5, 5, 3);
+		setMacCursor(macCursorCrossHair, 5, 5, false);
 		CursorMan.replaceCursorPalette(cursorPalette, 0, 2);
 		break;
 	case kMacCursorCrossBar:
-		CursorMan.replaceCursor(macCursorCrossBar, 11, 16, 4, 4, 3);
+		setMacCursor(macCursorCrossBar, 4, 4, false);
 		CursorMan.replaceCursorPalette(cursorPalette, 0, 2);
 		break;
 	case kMacCursorWatch:
-		CursorMan.replaceCursor(macCursorWatch, 11, 16, 5, 8, 3);
+		setMacCursor(macCursorWatch, 5, 8, false);
 		CursorMan.replaceCursorPalette(cursorPalette, 0, 2);
 		break;
 	case kMacCursorCustom:
@@ -1437,7 +1496,9 @@ void MacWindowManager::replaceCursor(MacCursorType type, Cursor *cursor) {
 			return;
 		}
 
-		CursorMan.replaceCursor(cursor);
+		setCustomMacCursor(cursor, false);
+		if (cursor->getPalette())
+			CursorMan.replaceCursorPalette(cursor->getPalette(), cursor->getPaletteStartIndex(), cursor->getPaletteCount());
 		break;
 	}
 

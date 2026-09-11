@@ -22,6 +22,7 @@
 #include "common/memstream.h"
 #include "common/savefile.h"
 #include "common/config-manager.h"
+#include "common/fs.h"
 
 #include "director/director.h"
 #include "director/archive.h"
@@ -39,6 +40,19 @@
 
 
 namespace Director {
+
+static Cast *findCastForArchive(Movie *movie, Archive *archive, uint32 libResourceId) {
+	Cast *archiveCast = nullptr;
+	for (auto &it : *movie->getCasts()) {
+		Cast *cast = it._value;
+		if (cast->getArchive().get() == archive) {
+			archiveCast = cast;
+			if (cast->_libResourceId == libResourceId)
+				return cast;
+		}
+	}
+	return archiveCast;
+}
 
 bool RIFXArchive::writeToFile(Common::String filename, Movie *movie) {
 	if (_rifxType == MKTAG('F', 'G', 'D', 'M') || _rifxType == MKTAG('F', 'G', 'D', 'C')) {
@@ -60,12 +74,23 @@ bool RIFXArchive::writeToFile(Common::String filename, Movie *movie) {
 		filename = movie->getMacName();
 	}
 
-	Common::String saveFileName = g_director->getTargetName() + "-" + filename;
-	// Don't open the save file as compressed which doesn't support seeking
-	Common::OutSaveFile *saveFile = g_engine->getSaveFileManager()->openForSaving(saveFileName, false);
+	// Director saves an external cast back to its fileName. For a bare cast
+	// name, that means beside the projector. Willy relies on this: DATA.CST in
+	// the projector directory is the writable cast, while Data/DATA.CST is the
+	// factory fallback found through the Lingo searchPath.
+	Common::Path savePath(filename, g_director->_dirSeparator);
+	if (savePath.getParent().empty()) {
+		Common::Path projectorPath(g_director->getRawEXEName(), g_director->_dirSeparator);
+		savePath = projectorPath.getParent().appendComponent(savePath.baseName());
+	}
+	Common::Path saveFileName = g_director->getGameDataDir()->getPath().join(savePath).normalize();
+	debugC(2, kDebugSaving, "RIFXArchive::writeToFile: saving '%s' to '%s'",
+		filename.c_str(), saveFileName.toString(Common::Path::kNativeSeparator).c_str());
+	Common::FSNode saveNode(saveFileName);
+	Common::SeekableWriteStream *saveFile = saveNode.createWriteStream(true);
 
 	if (!saveFile) {
-		warning("RIFXArchive::writeToFile: Failed to open file %s for saving", saveFileName.c_str());
+		warning("RIFXArchive::writeToFile: Failed to open file %s for saving", saveFileName.toString(Common::Path::kNativeSeparator).c_str());
 		return false;
 	}
 
@@ -120,16 +145,20 @@ bool RIFXArchive::writeToFile(Common::String filename, Movie *movie) {
 			break;
 
 		case MKTAG('C', 'A', 'S', 't'):
-			cast = movie->getCastByLibResourceID(it->libResourceId);
+			cast = findCastForArchive(movie, this, it->libResourceId);
+			if (!cast)
+				error("RIFXArchive::writeToFile: no cast owns CASt resource %d", it->index);
 			cast->saveCastData(saveFile, it);
 			break;
 
 		case MKTAG('V', 'W', 'C', 'F'):
 		case MKTAG('D', 'R', 'C', 'F'):
-			// There is only one config resource, that is for the internal cast
-			// The external casts don't have a config
-			// movie->getCast() returns the internal cast
-			cast = movie->getCast();
+			// The config belongs to the cast archive being written. External
+			// casts can carry one too; using the movie's internal cast here
+			// changes their platform and member bounds.
+			cast = findCastForArchive(movie, this, 0);
+			if (!cast)
+				error("RIFXArchive::writeToFile: no cast owns config resource %d", it->index);
 			if (cast->getConfigSize() == 0) {
 				// Unsupported version (D10+): keep the original bytes
 				debugC(7, kDebugSaving, "Saving resource %s as it is, without modification", tag2str(it->tag));
@@ -190,12 +219,10 @@ bool RIFXArchive::writeToFile(Common::String filename, Movie *movie) {
 	// Write the movie out, stored in dumpData
 	if (saveFile) {
 		saveFile->flush();
-		debugC(3, kDebugSaving, "RIFXArchive::writeStream: Saved the movie as file %s", saveFileName.c_str());
+		debugC(3, kDebugSaving, "RIFXArchive::writeStream: Saved the movie as file %s", saveFileName.toString(Common::Path::kNativeSeparator).c_str());
 	} else {
-		warning("RIFXArchive::writeStream: Error saving the file %s", saveFileName.c_str());
+		warning("RIFXArchive::writeStream: Error saving the file %s", saveFileName.toString(Common::Path::kNativeSeparator).c_str());
 	}
-	// Add to search index
-	((SavedArchive *)SearchMan.getArchive(kSavedFilesArchive))->_addFile(saveFileName);
 
 	delete saveFile;
 	for (auto it : builtResources) {
@@ -227,7 +254,9 @@ bool RIFXArchive::writeMemoryMap(Common::SeekableWriteStream *writeStream, Commo
 	writeStream->writeUint16LE(_mmapEntrySize);
 
 	uint32 newResCount = resources.size();
-	writeStream->writeUint32LE(newResCount + _totalCount - _resCount); // _totalCount - _resCount is the number of empty entries
+	// rebuildResources() emits a compact table containing exactly this many
+	// slots. The mmap capacity must describe the physical table that follows.
+	writeStream->writeUint32LE(newResCount);
 	writeStream->writeUint32LE(newResCount);
 	writeStream->seek(8, SEEK_CUR);		// In the original file, these 8 bytes are all 0xFF, so this will produce a diff
 
@@ -366,6 +395,9 @@ Common::Array<Resource *> RIFXArchive::rebuildResources(Movie *movie) {
 	// Iterate over all the casts
 	for (auto it : *(movie->getCasts())) {
 		cast = it._value;
+		if (cast->getArchive().get() != this)
+			continue;
+
 
 		// Iterate over all the loaded members of the cast to check for new cast members
 		for (auto jt : *(cast->_loadedCast)) {
@@ -411,11 +443,29 @@ Common::Array<Resource *> RIFXArchive::rebuildResources(Movie *movie) {
 						res->children.push_back(child);
 					}
 
+					// A newly constructed text/field member has no on-disk child
+					// to clone. Director allocates an STXT resource for it when the
+					// cast is saved.
+					if (res->children.empty() &&
+							(jt._value->_type == kCastText || jt._value->_type == kCastButton)) {
+						uint16 childIndex = _resources.size();
+						Resource &newChild = _types[MKTAG('S', 'T', 'X', 'T')][childIndex];
+						newChild.tag = MKTAG('S', 'T', 'X', 'T');
+						newChild.index = childIndex;
+						newChild.accessed = true;
+						_resources.push_back(&newChild);
+						res->children.push_back(newChild);
+						jt._value->_children.push_back(newChild);
+					}
+
 					for (const auto &child : res->children) {
 						_keyData[child.tag][res->index].push_back(child.index);
 						_keyTableUsedCount += 1;
 						_keyTableEntryCount += 1;
 					}
+					// The member now has a persistent CASt resource. Without this,
+					// another save in the same session rebuilds its ownership again.
+					jt._value->_index = res->index;
 
 					debugC(5, kDebugSaving, "RIFXArchive::rebuildResources(): new 'CASt' resource added");
 				} else {
@@ -488,7 +538,9 @@ Common::Array<Resource *> RIFXArchive::rebuildResources(Movie *movie) {
 
 		case MKTAG('C', 'A', 'S', 't'):
 			{
-				cast = movie->getCastByLibResourceID(it->libResourceId);
+				cast = findCastForArchive(movie, this, it->libResourceId);
+				if (!cast)
+					error("RIFXArchive::rebuildResources: no cast owns CASt resource %d", it->index);
 				// The castIds of cast members start from _castArrayStart
 				CastMember *target = cast->getCastMember(it->castId + cast->_castArrayStart);
 
@@ -524,7 +576,9 @@ Common::Array<Resource *> RIFXArchive::rebuildResources(Movie *movie) {
 			{
 				// Only one config resource per movie
 				// No need to update the key mapping
-				cast = movie->getCast();
+				cast = findCastForArchive(movie, this, 0);
+				if (!cast)
+					error("RIFXArchive::rebuildResources: no cast owns config resource %d", it->index);
 				resSize = cast->getConfigSize();
 
 				it->offset = currentSize;
@@ -734,7 +788,7 @@ CastMember *RIFXArchive::findResourceOwner(Movie *movie, uint32 tag, uint16 inde
 		return nullptr;
 
 	const Resource &parent = castResMap[parentIndex];
-	Cast *cast = movie->getCastByLibResourceID(parent.libResourceId);
+	Cast *cast = findCastForArchive(movie, this, parent.libResourceId);
 	return cast ? cast->getCastMember(parent.castId + cast->_castArrayStart) : nullptr;
 }
 

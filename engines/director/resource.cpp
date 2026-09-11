@@ -43,6 +43,19 @@
 
 namespace Director {
 
+static Common::FSNode findChildIgnoreCase(const Common::FSNode &directory, const Common::String &name) {
+	Common::FSList children;
+	if (!directory.isDirectory() || !directory.getChildren(children, Common::FSNode::kListFilesOnly))
+		return Common::FSNode();
+
+	for (const Common::FSNode &child : children) {
+		if (child.getName().equalsIgnoreCase(name))
+			return child;
+	}
+
+	return Common::FSNode();
+}
+
 Archive *DirectorEngine::createArchive() {
 	if (getVersion() < 400) {
 		if (getPlatform() != Common::kPlatformWindows)
@@ -83,7 +96,10 @@ Common::Error Window::loadInitialMovie() {
 		// A valid projector archive, add to SearchMan
 		SearchMan.add(_vm->getRawEXEName(), multiArchive);
 
-		if (ConfMan.getBool("dump_scripts"))
+		// With an explicit start movie, the projector is only a supporting archive.
+		// Its complete resource dump is both unrelated to that movie's scripts and
+		// can delay movie loading substantially for large projectors.
+		if (ConfMan.getBool("dump_scripts") && !ConfMan.hasKey("start_movie"))
 			multiArchive->dumpArchive(Common::Path("./dumps").join(encodePathForDump(movie)));
 
 	} else {
@@ -256,19 +272,82 @@ Common::SharedPtr<Archive> DirectorEngine::openArchive(const Common::Path &path)
 	}
 
 	Archive *result = nullptr;
-	if (getPlatform() == Common::kPlatformWindows) {
+
+	// Prefer a same-named archive beside the projector, then the exact authored
+	// path below the game directory. Director resolves a bare external cast name
+	// beside the projector before consulting its searchPath. SearchMan also
+	// contains archives rooted at common Director subdirectories and may otherwise
+	// let a factory fallback shadow the projector's writable cast.
+	// For Willy, Data/Data.cst is the fallback and DATA.CST beside Willy32.exe is
+	// the live cast.
+	Common::Path projectorPath(getRawEXEName(), _dirSeparator);
+	Common::Path projectorDir = _gameDataDir.getPath() / projectorPath.getParent();
+	Common::FSNode exactNode = findChildIgnoreCase(Common::FSNode(projectorDir), path.getLastComponent().toString());
+	Common::Path resolvedPath = path;
+	if (exactNode.exists())
+		resolvedPath = projectorPath.getParent().appendComponent(exactNode.getName());
+	if (!exactNode.exists()) {
+		Common::Path exactFullPath = _gameDataDir.getPath() / path;
+		exactNode = Common::FSNode(exactFullPath);
+	}
+	if (exactNode.exists() && !exactNode.isDirectory()) {
+		Common::File *file = new Common::File();
+		if (file->open(exactNode)) {
+			uint32 initialTag = file->readUint32LE();
+			file->seek(0);
+			if (initialTag == MKTAG('R', 'I', 'F', 'X') || initialTag == MKTAG('X', 'F', 'I', 'R')) {
+				result = createArchive();
+				if (!result->openStream(file)) {
+					delete result;
+					result = nullptr;
+				} else {
+					debugC(2, kDebugPaths, "DirectorEngine::openArchive: opened exact path '%s'",
+						exactNode.getPath().toString(Common::Path::kNativeSeparator).c_str());
+					file = nullptr; // Ownership passed to the archive.
+				}
+			}
+		}
+		delete file;
+	}
+
+	if (!result && getPlatform() == Common::kPlatformWindows) {
 		result = loadEXE(path);
-	} else {
+	} else if (!result) {
 		result = loadMac(path);
 	}
 	if (!result) {
 		result = createArchive();
 		if (!result->openFile(path)) {
-			delete result;
-			return nullptr;
+			// Authored Windows paths can retain an installation prefix which is
+			// meaningless on the host (for example
+			// 700/Terzio/Willy1/Data/data.cst). Search progressively shorter
+			// multi-component suffixes before falling back to failure. Keeping at
+			// least two components avoids ambiguous basename matches.
+			Common::String suffix = path.toString('/');
+			bool opened = false;
+			for (;;) {
+				size_t separator = suffix.find('/');
+				if (separator == Common::String::npos)
+					break;
+				suffix = suffix.substr(separator + 1);
+				if (!suffix.contains('/'))
+					break;
+				if (result->openFile(Common::Path(suffix, '/'))) {
+					debugC(2, kDebugPaths, "DirectorEngine::openArchive: resolved '%s' as suffix '%s'", path.toString().c_str(), suffix.c_str());
+					opened = true;
+					break;
+				}
+			}
+			if (!opened) {
+				delete result;
+				return nullptr;
+			}
 		}
 	}
-	result->setPathName(path);
+	// Preserve the physical archive selected by the projector-first lookup.
+	// This matters when a later `save(castLib ...)` writes it back on a
+	// case-sensitive host.
+	result->setPathName(resolvedPath);
 	Common::SharedPtr<Archive> arch(result);
 	_allSeenResFiles.setVal(path, arch);
 

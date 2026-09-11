@@ -32,6 +32,7 @@ namespace Director {
 
 class TextCastMember : public CastMember {
 public:
+	TextCastMember(Cast *cast, uint16 castId);
 	TextCastMember(Cast *cast, uint16 castId, Common::SeekableReadStreamEndian &stream, uint16 version, uint8 flags1 = 0, bool asButton = false);
 	TextCastMember(Cast *cast, uint16 castId, TextCastMember &source);
 
@@ -99,6 +100,7 @@ public:
 	uint32 getSTXTResourceSize();
 	uint32 writeSTXTResource(Common::SeekableWriteStream *writeStream, uint32 offset);
 	uint8 getFormattingCount();
+	Common::String encodeSTXTText();
 
 	uint8 _borderSize;
 	uint8 _gutterSize;

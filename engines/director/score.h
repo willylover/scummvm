@@ -98,6 +98,9 @@ public:
 
 	void setCurrentFrame(uint16 frameId);
 	uint16 getCurrentFrameNum() { return _curFrameNumber; }
+	uint16 getLingoFrameNum() const {
+		return _playState == kPlayLoaded && _nextFrame ? _nextFrame : _curFrameNumber;
+	}
 	int getNextFrame() { return _nextFrame; }
 	uint16 getFramesNum() { return _numFrames; }
 
@@ -117,7 +120,7 @@ public:
 
 	uint16 getSpriteIDOfActiveWidget();
 	uint16 getSpriteIDFromPos(Common::Point pos);
-	uint16 getMouseSpriteIDFromPos(Common::Point pos);
+	uint16 getMouseSpriteIDFromPos(Common::Point pos, int maxChannel = -1);
 	uint16 getActiveSpriteIDFromPos(Common::Point pos);
 	bool checkSpriteRollOver(uint16 spriteId, Common::Point pos);
 	uint16 getRollOverSpriteIDFromPos(Common::Point pos);

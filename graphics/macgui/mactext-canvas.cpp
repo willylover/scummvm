@@ -678,8 +678,8 @@ void MacTextCanvas::reallocSurface() {
 }
 
 void MacTextCanvas::render(int from, int to, ManagedSurface *target, uint32 fillColor, bool bboxesOnly) {
-	int w = MIN(_maxWidth, _textMaxWidth);
 	ManagedSurface *surface = target ? target : _surface;
+	int w = MIN(_maxWidth, _textMaxWidth);
 
 	int myFrom = from, myTo = to + 1, delta = 1;
 

@@ -264,6 +264,7 @@ struct CFrame {	/* proc/func call stack frame */
 	int				paramCount;			/* original number of arguments submitted */
 	Common::Array<Datum> paramList;		/* original argument list */
 	Window			*retWindow = nullptr;	/* window to restore on return */
+	int retSpriteNum = -1;				/* sendSprite caller's channel */
 };
 
 struct LingoEvent {
@@ -277,6 +278,7 @@ struct LingoEvent {
 	Common::Point mousePos;
 	int behaviorIndex;
 	AbstractObject *scriptInstance;
+	Common::Array<Datum> args;
 
 	LingoEvent(LEvent e, int ei, ScriptType st, bool pass, CastMemberID si = CastMemberID(), Common::Point mp = Common::Point(-1, -1), int bi = -1) {
 		event = e;
@@ -354,6 +356,9 @@ struct LingoState {
 	Datum me;								// current me object
 	StackData stack;
 	int currentChannelId = 0;
+	// After go() freezes an input handler, resume through the handler which
+	// issued the branch but do not return into its source-frame dispatchers.
+	int inputBranchTargetDepth = -1;
 
 	~LingoState();
 };
@@ -416,7 +421,7 @@ public:
 	// lingo-events.cpp
 private:
 	void initEventHandlerTypes();
-	bool processEvent(LEvent event, ScriptType st, CastMemberID scriptId, int channelId = -1, AbstractObject *obj = nullptr);
+	bool processEvent(LEvent event, ScriptType st, CastMemberID scriptId, int channelId = -1, AbstractObject *obj = nullptr, const Common::Array<Datum> &args = Common::Array<Datum>());
 
 public:
 	ScriptType event2script(LEvent ev);

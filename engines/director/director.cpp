@@ -114,6 +114,7 @@ DirectorEngine::DirectorEngine(OSystem *syst, const DirectorGameDescription *gam
 	_key = 0;
 	_keyCode = 0;
 	_keyFlags = 0;
+	_skipTransitionMouseUp = false;
 
 	_wm = nullptr;
 

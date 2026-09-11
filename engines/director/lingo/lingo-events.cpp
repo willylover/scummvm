@@ -450,6 +450,18 @@ void Movie::queueEvent(Common::Queue<LingoEvent> &queue, LEvent event, int targe
 	_nextEventId++;
 	int eventId = _nextEventId;
 
+	// Frame broadcasts visit each sprite's behaviors independently, then
+	// visit the frame and movie scripts once with targetId zero.
+	if (_vm->getVersion() >= 600 && targetId > 0 &&
+			(event == kEventEnterFrame || event == kEventExitFrame)) {
+		Channel *channel = _score->getChannelById(targetId);
+		if (channel) {
+			for (uint i = 0; i < channel->_scriptInstanceList.size(); i++)
+				queue.push(LingoEvent(event, eventId, kSpriteHandler, true, pos, targetId, i));
+		}
+		return;
+	}
+
 	int oldQueueSize = queue.size();
 
 	uint16 channelId = 0;
@@ -612,6 +624,7 @@ void Movie::queueEvent(Common::Queue<LingoEvent> &queue, LEvent event, int targe
 		case kEventPrepareFrame:	// D6+
 		case kEventMouseUpOutSide:	// D6+
 		case kEventMouseWithin:		// D6+
+		case kEventCuePassed:		// D6+
 			if (_vm->getVersion() >= 600) {
 				if (pointedSpriteId != 0) {
 					Channel *channel = _score->getChannelById(pointedSpriteId);
@@ -708,7 +721,25 @@ void Movie::processEvent(LEvent event, int targetId) {
 	_lingo->processEvents(queue, false);
 }
 
+void Movie::processEvent(LEvent event, const Common::Array<Datum> &args) {
+	Common::Queue<LingoEvent> queue;
+	queueEvent(queue, event, 0);
+	Common::Queue<LingoEvent> withArgs;
+	while (!queue.empty()) {
+		LingoEvent item = queue.pop();
+		item.args = args;
+		withArgs.push(item);
+	}
+	_vm->setCurrentWindow(this->getWindow());
+	_lingo->processEvents(withArgs, false);
+}
+
 void Movie::broadcastEvent(LEvent event) {
+	Common::Array<Datum> args;
+	broadcastEvent(event, args);
+}
+
+void Movie::broadcastEvent(LEvent event, const Common::Array<Datum> &args) {
 	Common::Queue<LingoEvent> queue;
 
 	for (uint i = 1; i < _score->_channels.size(); i++) {
@@ -720,6 +751,15 @@ void Movie::broadcastEvent(LEvent event) {
 	// Each sprite is an independent recipient; the frame and movie scripts get
 	// the event exactly once, after every behavior.
 	queueEvent(queue, event, 0);
+	if (!args.empty()) {
+		Common::Queue<LingoEvent> withArgs;
+		while (!queue.empty()) {
+			LingoEvent item = queue.pop();
+			item.args = args;
+			withArgs.push(item);
+		}
+		queue = withArgs;
+	}
 
 	_vm->setCurrentWindow(this->getWindow());
 	_lingo->processEvents(queue, false);
@@ -743,6 +783,11 @@ void Lingo::processEvents(Common::Queue<LingoEvent> &queue, bool isInputEvent) {
 
 		// fetch the sprite ID, script ID to call, etc if not present.
 		movie->resolveScriptEvent(el);
+		// A queued event may outlive the score span of the behavior instance it
+		// captured. Director retires that instance at endSprite; do not dispatch
+		// an old prepareFrame/mouse event through a retained helper reference.
+		if (el.scriptInstance && el.scriptInstance->isDisposed())
+			continue;
 
 		// if this is the first event in the handler chain,
 		// ignore _passEvent for the first time
@@ -770,8 +815,22 @@ void Lingo::processEvents(Common::Queue<LingoEvent> &queue, bool isInputEvent) {
 		debugC(5, kDebugEvents, "Lingo::processEvents: starting event script (%s, %s, %s, %d)",
 			_eventHandlerTypes[el.event], scriptType2str(el.scriptType), el.scriptId.asString().c_str(), el.channelId
 		);
-		bool completed = processEvent(el.event, el.scriptType, el.scriptId, el.channelId, el.scriptInstance);
+		bool completed = processEvent(el.event, el.scriptType, el.scriptId, el.channelId, el.scriptInstance, el.args);
 		movie->_lastEventId[el.event] = el.eventId;
+
+		// A handler which branches with go() freezes until the destination frame
+		// is entered and sets _passEvent false. Remaining handlers belong to the
+		// source event and must not override that branch. This matters for both
+		// input propagation and frame broadcasts: a later hold-frame exitFrame
+		// handler must not replace an earlier behavior's go(#next).
+		if (!completed && !_passEvent) {
+			queue.clear();
+			if (isInputEvent) {
+				LingoState *state = g_director->getCurrentWindow()->getLastFrozenLingoState();
+				if (state && !state->callstack.empty())
+					state->inputBranchTargetDepth = state->callstack.size() - 1;
+			}
+		}
 
 		if (_vm->getVersion() >= 600) {
 			// Reset it for further event processing
@@ -799,7 +858,10 @@ void Lingo::processEvents(Common::Queue<LingoEvent> &queue, bool isInputEvent) {
 	}
 }
 
-bool Lingo::processEvent(LEvent event, ScriptType st, CastMemberID scriptId, int channelId, AbstractObject *obj) {
+bool Lingo::processEvent(LEvent event, ScriptType st, CastMemberID scriptId, int channelId, AbstractObject *obj, const Common::Array<Datum> &args) {
+	// Events can run inside another handler (for example beginSprite while
+	// sendSprite initializes a channel). Do not execute their caller too.
+	int callerDepth = _state->callstack.size();
 	_state->currentChannelId = channelId;
 
 	if (!_eventHandlerTypes.contains(event))
@@ -808,10 +870,15 @@ bool Lingo::processEvent(LEvent event, ScriptType st, CastMemberID scriptId, int
 
 	if (g_director->getVersion() >= 600 && st == kScoreScript && obj) {
 		if (obj->getMethod(_eventHandlerTypes[event]).type != VOIDSYM) {
+			uint savedSpriteNum = g_director->getCurrentMovie()->_currentSpriteNum;
 			g_director->getCurrentMovie()->_currentSpriteNum = channelId;
 			push(Datum(obj));
-			LC::call(_eventHandlerTypes[event], 1, false);
-			return execute();
+			for (const Datum &arg : args)
+				push(arg);
+			LC::call(_eventHandlerTypes[event], 1 + args.size(), false);
+			if (callerDepth && (int)_state->callstack.size() > callerDepth)
+				_state->callstack.back()->retSpriteNum = savedSpriteNum;
+			return execute(callerDepth);
 		} else {
 			return true;
 		}
@@ -832,8 +899,11 @@ bool Lingo::processEvent(LEvent event, ScriptType st, CastMemberID scriptId, int
 			nargs = 1;
 		}
 
+		for (const Datum &arg : args)
+			push(arg);
+		nargs += args.size();
 		LC::call(script->_eventHandlers[event], nargs, false);
-		return execute();
+		return execute(callerDepth);
 	} else {
 		debugC(9, kDebugEvents, "Lingo::processEvent(%s, %s, %s): no handler", _eventHandlerTypes[event], scriptType2str(st), scriptId.asString().c_str());
 	}
@@ -851,6 +921,7 @@ void Score::killScriptInstances(int frameNum) {
 	if (frameNum < _currentFrame->_mainChannels.scriptSpriteInfo.startFrame ||
 	    frameNum > _currentFrame->_mainChannels.scriptSpriteInfo.endFrame) {
 		if (_scriptChannelScriptInstance.type == OBJECT) {
+			_scriptChannelScriptInstance.u.obj->dispose();
 			_scriptChannelScriptInstance = Datum();
 			debugC(1, kDebugLingoExec, "Score::killScriptInstances(): Killed script instances for script channel. frame %d [%d-%d]",
 				frameNum,
@@ -871,6 +942,10 @@ void Score::killScriptInstances(int frameNum) {
 			_movie->processEvent(kEventEndSprite, i);
 			_disableGoPlayUpdateStage = prevDis;
 
+			for (const Datum &instance : channel->_scriptInstanceList) {
+				if (instance.type == OBJECT)
+					instance.u.obj->dispose();
+			}
 			channel->_scriptInstanceList.clear();
 			channel->_sprite->_behaviors.clear();
 			debugC(1, kDebugLingoExec, "Score::killScriptInstances(): Killed script instances for channel %d. frame %d [%d-%d]",
@@ -891,8 +966,17 @@ Datum Score::createScriptInstance(BehaviorElement *behavior) {
 		return Datum();
 	}
 
+	int callerDepth = g_lingo->_state->callstack.size();
 	g_lingo->push(scr);
 	LC::call("new", 1, true);
+	// The default constructor is a synchronous builtin, but a behavior's
+	// own new handler is queued on the Lingo stack and must run first.
+	if ((int)g_lingo->_state->callstack.size() > callerDepth) {
+		if (!g_lingo->execute(callerDepth)) {
+			warning("Score::createScriptInstance(): Constructor suspended for behavior %s", behavior->toString().c_str());
+			return Datum();
+		}
+	}
 	Datum instance = g_lingo->pop();
 
 	if (instance.type != OBJECT) {
@@ -909,7 +993,7 @@ Datum Score::createScriptInstance(BehaviorElement *behavior) {
 	// Evaluate the params
 	g_lingo->push(behavior->initializerParams);
 	LB::b_value(1);
-	g_lingo->execute();
+	g_lingo->execute(callerDepth);
 
 	if (debugChannelSet(5, kDebugLingoExec)) {
 		g_lingo->printStack("  Parsed behavior parameters: ", 0);
@@ -989,6 +1073,9 @@ void Score::createScriptInstances(int frameNum) {
 				continue;
 			}
 
+			// spriteNum belongs to the behavior instance, even when a movie
+			// handler or another object calls it outside a sprite event.
+			instance.u.obj->setProp("spriteNum", Datum(i), true);
 			channel->_scriptInstanceList.push_back(instance);
 		}
 

@@ -610,22 +610,25 @@ bool MacWindow::processEvent(Common::Event &event) {
 		setHighlight(kBorderNone);
 		break;
 
-	case Common::EVENT_KEYDOWN:
-		if (_callback)
-			result = _callback(kBorderNone, event, _dataPtr);
-
+	case Common::EVENT_KEYDOWN: {
 		if (!_editable && !(_wm->getActiveWidget() && _wm->getActiveWidget()->isEditable()))
-			return result;
+			return _callback ? _callback(kBorderNone, event, _dataPtr) : false;
 
 		if (_wm->getActiveWidget()) {
 			if (_callback) {
-				return result && _wm->getActiveWidget()->processEvent(event);
+				// Director edits a field before dispatching its keyDown event. This
+				// lets Lingo inspect and modify the resulting text (including removing
+				// Return from single-line fields).
+				bool editorHandled = _wm->getActiveWidget()->processEvent(event);
+				result = _callback(kBorderNone, event, _dataPtr);
+				return result || editorHandled;
 			} else {
 				return _wm->getActiveWidget()->processEvent(event);
 			}
 		}
 
 		return result;
+	}
 
 	case Common::EVENT_WHEELUP:
 	case Common::EVENT_WHEELDOWN:

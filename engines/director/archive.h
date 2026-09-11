@@ -56,7 +56,9 @@ struct Resource {
 	Common::Array<Resource> children;
 	bool accessed;
 
-	Resource() = default;
+	Resource() : index(0), offset(0), size(0), uncompSize(0), compressionType(0),
+		castId(0), libResourceId(0), tag(0), flags(0), unk1(0),
+		nextFreeResourceID(0), accessed(false) {}
 	Resource(Resource *original) {
 		index = original->index;
 		offset = original->offset;

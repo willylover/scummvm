@@ -64,6 +64,10 @@
 
 namespace Director {
 
+static Common::String encodeCastInfoString(Cast *cast, const Common::String &value) {
+	return value.decode(Common::kUtf8).encode(cast->getFileEncoding());
+}
+
 Cast::Cast(Movie *movie, uint16 castLibID, bool isShared, bool isExternal, uint32 libResourceId) {
 	_movie = movie;
 	_vm = _movie->getVM();
@@ -263,6 +267,12 @@ CastMember *Cast::setCastMember(int castId, CastMember *cast) {
 	cast->incRefCount();
 	_loadedCast->setVal(castId, cast);
 	return cast;
+}
+
+void Cast::createTextCastMember(int castId) {
+	setCastMember(castId, new TextCastMember(this, castId));
+	_castsInfo[castId] = new CastMemberInfo();
+	rebuildCastNameCache();
 }
 
 bool Cast::duplicateCastMember(CastMember *source, CastMemberInfo *info, int targetId) {
@@ -854,6 +864,9 @@ void Cast::loadCast() {
 		Common::Array<uint16> casStar = _castArchive->getResourceIDList(MKTAG('C', 'A', 'S', '*'));
 		if (!casStar.empty())
 			libResourceId = _castArchive->getResourceDetail(MKTAG('C', 'A', 'S', '*'), casStar[0]).libResourceId;
+		// The archive's KEY* table is authoritative for an external cast.
+		// Keep the resolved id so runtime-created members join the same CAS*.
+		_libResourceId = libResourceId;
 	}
 
 	if (cast.size() > 0) {
@@ -1089,26 +1102,26 @@ void Cast::writeCastInfo(Common::SeekableWriteStream *writeStream, uint32 castId
 			break;
 
 		case 0:
-			castInfo.strings[0].writeString(ci->script, false);
+			castInfo.strings[0].writeString(encodeCastInfoString(this, ci->script), false);
 			break;
 
 		case 1:
-			castInfo.strings[1].writeString(ci->name);
+			castInfo.strings[1].writeString(encodeCastInfoString(this, ci->name));
 			break;
 
 		case 2:
-			castInfo.strings[2].writeString(ci->directory);
+			castInfo.strings[2].writeString(encodeCastInfoString(this, ci->directory));
 			break;
 
 		case 3:
-			castInfo.strings[3].writeString(ci->fileName);
+			castInfo.strings[3].writeString(encodeCastInfoString(this, ci->fileName));
 			break;
 
 		case 4:
 			if (_version < kFileVer500)
-				castInfo.strings[4].writeString(ci->fileType);
+				castInfo.strings[4].writeString(encodeCastInfoString(this, ci->fileType));
 			else
-				castInfo.strings[4].writeString(ci->propInit);
+				castInfo.strings[4].writeString(encodeCastInfoString(this, ci->propInit));
 			break;
 
 		case 5:
@@ -1156,7 +1169,7 @@ void Cast::writeCastInfo(Common::SeekableWriteStream *writeStream, uint32 castId
 			break;
 
 		case 10:
-			castInfo.strings[10].writeString(ci->xtraDisplayName, false);
+			castInfo.strings[10].writeString(encodeCastInfoString(this, ci->xtraDisplayName), false);
 			break;
 
 		case 11:
@@ -1192,7 +1205,7 @@ void Cast::writeCastInfo(Common::SeekableWriteStream *writeStream, uint32 castId
 			break;
 
 		case 16:
-			castInfo.strings[16].writeString(ci->mediaFormatName);
+			castInfo.strings[16].writeString(encodeCastInfoString(this, ci->mediaFormatName));
 			break;
 
 		case 17:
@@ -1207,12 +1220,12 @@ void Cast::writeCastInfo(Common::SeekableWriteStream *writeStream, uint32 castId
 
 		case 19:
 			castInfo.strings[19].data = (byte *)malloc(castInfo.strings[19].len);
-			castInfo.strings[19].writeString(ci->modifiedBy);
+			castInfo.strings[19].writeString(encodeCastInfoString(this, ci->modifiedBy));
 			break;
 
 		case 20:
 			castInfo.strings[20].data = (byte *)malloc(castInfo.strings[20].len);
-			castInfo.strings[20].writeString(ci->comments);
+			castInfo.strings[20].writeString(encodeCastInfoString(this, ci->comments));
 			break;
 
 		case 21:
@@ -1311,22 +1324,22 @@ uint32 Cast::getCastInfoStringLength(uint32 stringIndex, CastMemberInfo *ci) {
 		return 0;
 
 	case 0:
-		return ci->script.size();		// not pascal string
+		return encodeCastInfoString(this, ci->script).size();		// not pascal string
 
 	case 1:
-		return ci->name.size() ? ci->name.size() + 1 : 0;		// pascal string
+		return ci->name.size() ? encodeCastInfoString(this, ci->name).size() + 1 : 0;		// pascal string
 
 	case 2:
-		return ci->directory.size() ? ci->directory.size() + 1 : 0;		// pascal string
+		return ci->directory.size() ? encodeCastInfoString(this, ci->directory).size() + 1 : 0;		// pascal string
 
 	case 3:
-		return ci->fileName.size() ? ci->fileName.size() + 1 : 0;		// pascal string
+		return ci->fileName.size() ? encodeCastInfoString(this, ci->fileName).size() + 1 : 0;		// pascal string
 
 	case 4:
 		if (_version < kFileVer500)
-			return ci->fileType.size() ? ci->fileType.size() + 1 : 0;			// pascal string
+			return ci->fileType.size() ? encodeCastInfoString(this, ci->fileType).size() + 1 : 0;			// pascal string
 		else
-			return ci->propInit.size() ? ci->propInit.size() + 1 : 0;			// pascal string
+			return ci->propInit.size() ? encodeCastInfoString(this, ci->propInit).size() + 1 : 0;			// pascal string
 
 	case 5:
 		// Need a better check to see if the script edit info is valid
@@ -1360,7 +1373,7 @@ uint32 Cast::getCastInfoStringLength(uint32 stringIndex, CastMemberInfo *ci) {
 		return sizeof(ci->xtraGuid);
 
 	case 10:
-		return ci->xtraDisplayName.size();
+		return encodeCastInfoString(this, ci->xtraDisplayName).size();
 
 	case 11:
 		return ci->bpTable.size();
@@ -1378,7 +1391,7 @@ uint32 Cast::getCastInfoStringLength(uint32 stringIndex, CastMemberInfo *ci) {
 		return sizeof(ci->guid);
 
 	case 16:
-		return ci->mediaFormatName.size();
+		return encodeCastInfoString(this, ci->mediaFormatName).size();
 
 	case 17:
 		return 4;
@@ -1387,10 +1400,10 @@ uint32 Cast::getCastInfoStringLength(uint32 stringIndex, CastMemberInfo *ci) {
 		return 4;
 
 	case 19:
-		return ci->modifiedBy.size();
+		return encodeCastInfoString(this, ci->modifiedBy).size();
 
 	case 20:
-		return ci->comments.size();
+		return encodeCastInfoString(this, ci->comments).size();
 
 	case 21:
 		return sizeof(ci->imageQuality);
@@ -2040,11 +2053,11 @@ void Cast::loadCastInfo(Common::SeekableReadStreamEndian &stream, uint16 id) {
 		}
 		// fallthrough
 	case 20:
-		ci->comments = castInfo.strings[20].readString();
+		ci->comments = castInfo.strings[20].readString(this);
 		dumpS = Common::String::format("comments: '%s', ", ci->comments.c_str()) + dumpS;
 		// fallthrough
 	case 19:
-		ci->modifiedBy = castInfo.strings[19].readString();
+		ci->modifiedBy = castInfo.strings[19].readString(this);
 		dumpS = Common::String::format("modifiedBy: '%s', ", ci->modifiedBy.c_str()) + dumpS;
 		// fallthrough
 	case 18:
@@ -2066,7 +2079,7 @@ void Cast::loadCastInfo(Common::SeekableReadStreamEndian &stream, uint16 id) {
 		}
 		// fallthrough
 	case 16:
-		ci->mediaFormatName = castInfo.strings[16].readString();
+		ci->mediaFormatName = castInfo.strings[16].readString(this);
 		dumpS = Common::String::format("mediaFormatName: '%s', ", ci->mediaFormatName.c_str()) + dumpS;
 		// fallthrough
 	case 15:
@@ -2119,7 +2132,7 @@ void Cast::loadCastInfo(Common::SeekableReadStreamEndian &stream, uint16 id) {
 	case 10:
 		if (castInfo.strings[10].len) {
 			Common::hexdump(castInfo.strings[10].data, castInfo.strings[10].len);
-			ci->xtraDisplayName = castInfo.strings[10].readString(false); // C string
+			ci->xtraDisplayName = castInfo.strings[10].readString(this, false); // C string
 			dumpS = Common::String::format("xtraDisplayName: '%s', ", ci->xtraDisplayName.c_str()) + dumpS;
 		}
 		// fallthrough
@@ -2174,30 +2187,30 @@ void Cast::loadCastInfo(Common::SeekableReadStreamEndian &stream, uint16 id) {
 	case 4:
 		// The field changed its meaning in D5
 		if (_version < kFileVer500) {
-			ci->fileType = castInfo.strings[4].readString();
+			ci->fileType = castInfo.strings[4].readString(this);
 
 			dumpS = Common::String::format("fileType: '%s', ", ci->fileType.c_str()) + dumpS;
 
 		} else {
-			ci->propInit = castInfo.strings[4].readString();
+			ci->propInit = castInfo.strings[4].readString(this);
 
 			dumpS = Common::String::format("propInit: '%s', ", ci->propInit.c_str()) + dumpS;
 		}
 		// fallthrough
 	case 3:
-		ci->fileName = castInfo.strings[3].readString();
+		ci->fileName = castInfo.strings[3].readString(this);
 		dumpS = Common::String::format("fileName: '%s', ", ci->fileName.c_str()) + dumpS;
 		// fallthrough
 	case 2:
-		ci->directory = castInfo.strings[2].readString();
+		ci->directory = castInfo.strings[2].readString(this);
 		dumpS = Common::String::format("directory: '%s', ", ci->directory.c_str()) + dumpS;
 		// fallthrough
 	case 1:
-		ci->name = castInfo.strings[1].readString();
+		ci->name = castInfo.strings[1].readString(this);
 		dumpS = Common::String::format("name: '%s', ", ci->name.c_str()) + dumpS;
 		// fallthrough
 	case 0:
-		ci->script = castInfo.strings[0].readString(false);
+		ci->script = castInfo.strings[0].readString(this, false);
 		if (!ci->script.empty()) {
 			dumpS = Common::String::format("script: %d bytes, ", ci->script.size()) + dumpS;
 		}
@@ -2277,16 +2290,40 @@ Common::U32String Cast::decodeString(const Common::String &str) {
 		 */
 
 		for (uint i = 0; i < str.size(); i++) {
-			if (_macCharsToWin.contains(str[i]))
-				fixedStr += _macCharsToWin[str[i]];
+			byte value = (byte)str[i];
+			if (_macCharsToWin.contains(value))
+				fixedStr += _macCharsToWin[value];
 			else
-				fixedStr += str[i];
+				fixedStr += value;
 		}
 	} else {
 		fixedStr = str;
 	}
 
 	return fixedStr.decode(encoding);
+}
+
+Common::U32String Cast::decodeTextString(const Common::String &str, uint16 fontId) {
+	Common::Platform targetPlatform = _vm->getPlatform();
+	if (_platform == targetPlatform)
+		return decodeString(str);
+
+	Common::String mapped = str;
+	bool remapChars = true;
+	if (_fontMap.contains(fontId))
+		remapChars = _fontMap[fontId]->remapChars;
+
+	if (remapChars) {
+		const CharMap &charMap = _platform == Common::kPlatformMacintosh
+				? _macCharsToWin : _winCharsToMac;
+		for (uint i = 0; i < mapped.size(); i++) {
+			byte value = (byte)mapped[i];
+			if (charMap.contains(value))
+				mapped.setChar(charMap[value], i);
+		}
+	}
+
+	return mapped.decode(getEncoding(targetPlatform, _vm->getLanguage()));
 }
 
 // Score order, 'Sord' resource

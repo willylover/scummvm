@@ -1703,7 +1703,10 @@ ScriptContext *LingoCompiler::compileLingoV4(Common::SeekableReadStreamEndian &s
 		// Register this context's functions with the containing archive.
 		if (scriptType == kScoreScript || scriptType == kMovieScript) {
 			for (auto &it : _assemblyContext->_functionHandlers) {
-				if (!_assemblyArchive->functionHandlers.contains(it._key)) {
+				// Movie scripts define the global handler namespace. Score
+				// scripts remain a fallback for older movies, but a behavior or
+				// frame handler with the same name must not shadow a movie handler.
+				if (scriptType == kMovieScript || !_assemblyArchive->functionHandlers.contains(it._key)) {
 					_assemblyArchive->functionHandlers[it._key] = it._value;
 				}
 			}

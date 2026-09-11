@@ -58,13 +58,18 @@ void Lingo::func_goto(Datum &frame, Datum &movie, bool calledfromgo) {
 
 	stage->_skipFrameAdvance = true;
 
+	// A branch ends the current event's propagation.  The handler itself is
+	// resumed after the destination frame is entered, but cast/frame/movie
+	// handlers queued behind it still belong to the source frame and must not
+	// be dispatched there.  In particular, a mouseUp which selects an item and
+	// branches to an intro must not subsequently invoke that intro's movie-level
+	// mouseUp handler.
+	_passEvent = false;
+
 	// If there isn't already frozen Lingo (e.g. from a previous func_goto we haven't yet unfrozen),
 	// freeze this script context. We'll return to it after entering the next frame.
 
 	// Returning from a script with "play done" does not freeze the state. Instead it obliterates it.
-	if (!_playDone)
-		_freezeState = true;
-
 	if (movie.type != VOID) {
 		Common::String movieFilenameRaw = movie.asString();
 
@@ -100,6 +105,8 @@ void Lingo::func_goto(Datum &frame, Datum &movie, bool calledfromgo) {
 		score->_defaultCursor.readFromResource(4);
 		score->renderCursor(stage->getMousePos());
 
+		if (!_playDone)
+			_freezeState = true;
 		return;
 	}
 
@@ -111,9 +118,17 @@ void Lingo::func_goto(Datum &frame, Datum &movie, bool calledfromgo) {
 		score->setCurrentFrame(frame.asInt());
 	}
 
-	// Since the frames are not going to be consecutive, we might run into
-	// an endge case, so better kill behaviors proactively.
-	score->killScriptInstances(score->getNextFrame());
+	// Script instances still belong to the current frame until Score::update()
+	// performs the pending jump. Destroying them here runs nested endSprite
+	// handlers while the caller is being frozen and clears that freeze state;
+	// the rest of the old event chain then executes against the destination
+	// frame. Normal frame advancement already expires the instances before
+	// updateCurrentFrame().
+	// `go(the frame)` is an authored hold, not a transition. There is no
+	// destination frame to wait for, and freezing it leaves a stale hold
+	// handler which can later overwrite a real go(#next).
+	if (!_playDone && score->getNextFrame() != score->getCurrentFrameNum())
+		_freezeState = true;
 }
 
 void Lingo::func_gotoloop() {
@@ -127,6 +142,7 @@ void Lingo::func_gotoloop() {
 	score->gotoLoop();
 
 	stage->_skipFrameAdvance = true;
+	_passEvent = false;
 }
 
 void Lingo::func_gotonext() {
@@ -140,6 +156,10 @@ void Lingo::func_gotonext() {
 	debugC(3, kDebugLingoExec, "Lingo::func_gotonext(): going to next frame %d", score->getNextFrame());
 
 	stage->_skipFrameAdvance = true;
+	_passEvent = false;
+
+	if (!_playDone)
+		_freezeState = true;
 }
 
 void Lingo::func_gotoprevious() {
@@ -153,6 +173,7 @@ void Lingo::func_gotoprevious() {
 	debugC(3, kDebugLingoExec, "Lingo::func_gotoprevious(): going to previous frame %d", score->getNextFrame());
 
 	stage->_skipFrameAdvance = true;
+	_passEvent = false;
 }
 
 void Lingo::func_play(Datum &frame, Datum &movie) {

@@ -127,6 +127,7 @@ public:
 	Common::Rect getCastMemberInitialRect(int castId);
 	void setCastMemberModified(int castId);
 	CastMember *setCastMember(int castId, CastMember *cast);
+	void createTextCastMember(int castId);
 	bool duplicateCastMember(CastMember *source, CastMemberInfo *info, int targetId);
 	bool eraseCastMember(int castId);
 	CastMember *getCastMember(int castId, bool load = true);
@@ -148,6 +149,7 @@ public:
 
 	Common::CodePage getFileEncoding();
 	Common::U32String decodeString(const Common::String &str);
+	Common::U32String decodeTextString(const Common::String &str, uint16 fontId);
 
 	// Script contexts keep a back-pointer to their owning cast.
 	void registerScriptContext(ScriptContext *ctx) { _liveScriptContexts.setVal(ctx, true); }

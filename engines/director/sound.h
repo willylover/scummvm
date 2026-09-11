@@ -147,6 +147,7 @@ struct SoundChannel {
 	int originalRate;
 	FadeParams *fade;
 	int lastCuePointIndex;
+	int8 lastReportedActive;
 
 	// a non-zero sound ID if the channel is a puppet. i.e. it's controlled by lingo
 	SoundID puppet;
@@ -162,7 +163,7 @@ struct SoundChannel {
 
 	SoundChannel(): handle(), lastPlayedSound(SoundID()), stopOnZero(true), fromLastMovie(false), volume(255), originalRate(-1),
 		pitchShiftPercent(100), fade(nullptr), puppet(SoundID()), newPuppet(false), movieChanged(false), loopPtr(nullptr),
-		lastCuePointIndex(-1) {}
+		lastCuePointIndex(-1), lastReportedActive(-1) {}
 };
 
 class DirectorSound {

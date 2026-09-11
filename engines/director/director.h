@@ -251,6 +251,7 @@ public:
 	void processEventQUIT();
 	int getMacTicks();
 	Common::Array<Common::Event> _injectedEvents;
+	bool _skipTransitionMouseUp;
 
 	// game-quirks.cpp
 	bool lingoOpenWrapper(const char *target, Common::Platform platform, const Common::String &whichApplication, const Common::String &whichDocument);

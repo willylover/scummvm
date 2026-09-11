@@ -248,6 +248,7 @@ static const BuiltinProto builtins[] = {
 	{ "cast",			LB::b_member,			1, 2, 400, FBLTIN },	//			D4 f
 	{ "castLib",		LB::b_castLib,		1, 1, 500, FBLTIN },	//				D5 f
 	{ "member",			LB::b_member,		1, 2, 500, FBLTIN },	//				D5 f
+	{ "new",			LB::b_new,			1, 2, 500, FBLTIN },
 	{ "script",			LB::b_script,		1, 2, 400, FBLTIN },	//			D4 f
 	{ "sprite",			LB::b_sprite,		1, 1, 500, FBLTIN },	//				D5 f
 	{ "window",			LB::b_window,		1, 1, 400, FBLTIN },	//			D4 f
@@ -1010,29 +1011,37 @@ void LB::b_deleteProp(int nargs) {
 	Datum prop = g_lingo->pop();
 	Datum list = g_lingo->pop();
 	TYPECHECK2(list, ARRAY, PARRAY);
+	bool deleted = false;
 
 	switch (list.type) {
 	case ARRAY:
-		g_lingo->push(list);
-		g_lingo->push(prop);
-		b_deleteAt(nargs);
+		if (prop.asInt() > 0 && prop.asInt() <= (int)list.u.farr->arr.size()) {
+			list.u.farr->arr.remove_at(prop.asInt() - 1);
+			deleted = true;
+		}
 		break;
 	case PARRAY: {
 		int index = LC::compareArrays(LC::eqData, list, prop, true).u.i;
 		if (index > 0) {
 			list.u.parr->arr.remove_at(index - 1);
+			deleted = true;
 		}
 		break;
 	}
 	default:
 		break;
 	}
+
+	// Director reports whether deleteProp found the requested property through
+	// "the result". Several D6 titles use this to search a collection of
+	// property lists without a separate lookup.
+	g_lingo->_theResult = deleted ? 1 : 0;
 }
 
 
 void LB::b_duplicateList(int nargs) {
 	Datum list = g_lingo->pop();
-	TYPECHECK2(list, ARRAY, PARRAY);
+	TYPECHECK4(list, ARRAY, PARRAY, POINT, RECT);
 	g_lingo->push(list.clone());
 }
 
@@ -1200,10 +1209,12 @@ void LB::b_getOne(int nargs) {
 void LB::b_getPos(int nargs) {
 	Datum val = g_lingo->pop();
 	Datum list = g_lingo->pop();
-	TYPECHECK2(list, ARRAY, PARRAY);
+	TYPECHECK4(list, ARRAY, PARRAY, POINT, RECT);
 
 	switch (list.type) {
-	case ARRAY: {
+	case ARRAY:
+	case POINT:
+	case RECT: {
 		Datum d(0);
 		int index = LC::compareArrays(LC::eqDataStrict, list, val, true).u.i;
 		if (index > 0) {
@@ -1316,7 +1327,7 @@ void LB::b_list(int nargs) {
 void LB::b_listP(int nargs) {
 	Datum list = g_lingo->pop();
 	Datum d(0);
-	if (list.type == ARRAY || list.type == PARRAY) {
+	if (list.type == ARRAY || list.type == PARRAY || list.type == POINT || list.type == RECT) {
 		d.u.i = 1;
 	}
 	g_lingo->push(d);
@@ -1806,9 +1817,22 @@ void LB::b_openXlib(int nargs) {
 }
 
 void LB::b_save(int nargs) {
-	g_lingo->printSTUBWithArglist("b_save", nargs);
+	Datum castRef = g_lingo->pop();
+	if (castRef.type != CASTLIBREF) {
+		warning("save: expected a castLib reference, got %s", castRef.type2str());
+		return;
+	}
 
-	g_lingo->dropStack(nargs);
+	Movie *movie = g_director->getCurrentMovie();
+	CastMemberID memberId(0, castRef.u.i);
+	Cast *cast = movie ? movie->getCast(memberId) : nullptr;
+	if (!cast || !cast->getArchive()) {
+		warning("save: castLib %d has no writable archive", castRef.u.i);
+		return;
+	}
+
+	cast->getArchive()->writeToFile(
+		cast->getArchive()->getPathName().toString(g_director->_dirSeparator), movie);
 }
 
 void LB::b_saveMovie(int nargs) {
@@ -3459,9 +3483,8 @@ void LB::b_sendAllSprites(int nargs) {
 	Movie *movie = g_director->getCurrentMovie();
 	Score *score = movie ? movie->getScore() : nullptr;
 	if (score) {
-		score->createScriptInstances(score->getCurrentFrameNum());
-
-		bool anyHandled = false;
+		// Dispatch only to existing instances. Initializing sprites here can
+		// run beginSprite before prepareMovie has finished setting globals.
 		uint savedSpriteNum = movie->_currentSpriteNum;
 		for (uint ch = 1; ch < score->_channels.size(); ch++) {
 			Channel *channel = score->_channels[ch];
@@ -3477,21 +3500,9 @@ void LB::b_sendAllSprites(int nargs) {
 				movie->_currentSpriteNum = ch;
 				result = callBehaviorHandler(instance, msgName, extraArgs);
 				movie->_currentSpriteNum = savedSpriteNum;
-				anyHandled = true;
 			}
 		}
 
-		if (!anyHandled) {
-			Symbol h = g_lingo->getHandler(msgName);
-			if (h.type != VOIDSYM) {
-				for (int j = (int)extraArgs.size() - 1; j >= 0; j--)
-					g_lingo->push(extraArgs[j]);
-				int frame = g_lingo->_state->callstack.size();
-				LC::call(h, numExtraArgs, true);
-				g_lingo->execute(frame);
-				result = g_lingo->pop();
-			}
-		}
 	}
 
 	if (allowRetVal)
@@ -3525,7 +3536,30 @@ void LB::b_sendSprite(int nargs) {
 		if (channel->_scriptInstanceList.empty() && channel->_sprite && !channel->_sprite->_behaviors.empty())
 			score->createScriptInstances(score->getCurrentFrameNum());
 
-		bool handled = false;
+		// A sole matching recipient can run on the normal Lingo call stack.
+		// The sprite may have other behaviors which do not handle this message.
+		// In particular, go() may suspend the match before producing a result.
+		Datum soleInstance;
+		Symbol soleHandler;
+		uint matchingHandlers = 0;
+		for (const Datum &instance : channel->_scriptInstanceList) {
+			if (instance.type != OBJECT)
+				continue;
+			Symbol sym = instance.u.obj->getMethod(msgName);
+			if (sym.type == VOIDSYM)
+				continue;
+			matchingHandlers++;
+			soleInstance = instance;
+			soleHandler = sym;
+		}
+		if (matchingHandlers == 1 && soleHandler.type == HANDLER) {
+			g_lingo->push(soleInstance);
+			for (int j = (int)extraArgs.size() - 1; j >= 0; j--)
+				g_lingo->push(extraArgs[j]);
+			LC::call(soleHandler, 1 + numExtraArgs, allowRetVal);
+			return;
+		}
+
 		uint savedSpriteNum = movie->_currentSpriteNum;
 		for (uint i = 0; i < channel->_scriptInstanceList.size(); i++) {
 			Datum instance = channel->_scriptInstanceList[i];
@@ -3537,20 +3571,11 @@ void LB::b_sendSprite(int nargs) {
 			movie->_currentSpriteNum = (uint)spriteNum;
 			result = callBehaviorHandler(instance, msgName, extraArgs);
 			movie->_currentSpriteNum = savedSpriteNum;
-			handled = true;
 		}
 
-		if (!handled) {
-			Symbol h = g_lingo->getHandler(msgName);
-			if (h.type != VOIDSYM) {
-				for (int j = (int)extraArgs.size() - 1; j >= 0; j--)
-					g_lingo->push(extraArgs[j]);
-				int frame = g_lingo->_state->callstack.size();
-				LC::call(h, numExtraArgs, true);
-				g_lingo->execute(frame);
-				result = g_lingo->pop();
-			}
-		}
+		// An unhandled sendSprite message is ignored. Looking up a handler in
+		// the global namespace can select an unrelated behavior method and run
+		// it without its `me` object.
 	}
 
 	if (allowRetVal)
@@ -4164,6 +4189,49 @@ void LB::b_castLib(int nargs) {
 	}
 	res.type = CASTLIBREF;
 	g_lingo->push(res);
+}
+
+void LB::b_new(int nargs) {
+	Datum destination;
+	if (nargs == 2)
+		destination = g_lingo->pop();
+	Datum type = g_lingo->pop();
+	if (type.type != SYMBOL || !type.u.s->equalsIgnoreCase("field")) {
+		g_lingo->lingoError("new: unsupported cast member type %s", type.asString(true).c_str());
+		g_lingo->pushVoid();
+		return;
+	}
+
+	CastMemberID id(0, 1);
+	if (destination.type == CASTLIBREF)
+		id.castLib = destination.u.i;
+	else if (destination.type == CASTREF)
+		id = *destination.u.cast;
+	else if (nargs == 2) {
+		g_lingo->lingoError("new: expected a cast library or member reference");
+		g_lingo->pushVoid();
+		return;
+	}
+
+	Movie *movie = g_director->getCurrentMovie();
+	Cast *cast = movie ? movie->getCast(id) : nullptr;
+	if (!cast) {
+		g_lingo->lingoError("new: cast library %d not found", id.castLib);
+		g_lingo->pushVoid();
+		return;
+	}
+	if (destination.type != CASTREF)
+		id.member = cast->getNextUnusedID();
+	if (id.member < 1 || id.member > 32767) {
+		g_lingo->lingoError("new: invalid member number %d", id.member);
+		g_lingo->pushVoid();
+		return;
+	}
+
+	cast->createTextCastMember(id.member);
+	movie->getScore()->refreshPointersForCastMemberID(id);
+	debugC(3, kDebugLingoExec, "new(#field): created %s", id.asString().c_str());
+	g_lingo->push(Datum(id));
 }
 
 void LB::b_member(int nargs) {

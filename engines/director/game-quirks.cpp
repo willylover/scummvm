@@ -184,6 +184,7 @@ struct SaveFilePath {
 	const char *path;
 } const saveFilePaths[] = {
 	{ "darkeye", Common::kPlatformWindows, "SAVEDDKY/" },
+	{ "garygadget1", Common::kPlatformWindows, "DATA/Autos/" },
 	{ "missionplanetx", Common::kPlatformWindows, "" },
 	{"simpsonsstudio", Common::kPlatformWindows, "SIMPSONS/SUPPORT/TOONDATA/"},
 	{"simpsonsstudio", Common::kPlatformMacintosh, "SIMPSONS/SUPPORT/TOONDATA/"},
@@ -470,9 +471,10 @@ CachedArchive::CachedArchive(const FileInputList &files)
 		entry.data = i->data;
 		entry.size = i->size;
 
-		Common::Path name = i->name;
-		name.toLowercase();
-		_files[name] = entry;
+		// FileMap already compares paths case-insensitively. Preserve the
+		// spelling for directory enumeration, where Director returns the actual
+		// filename to Lingo and the UI.
+		_files[i->name] = entry;
 	}
 }
 

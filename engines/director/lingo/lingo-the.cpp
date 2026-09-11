@@ -636,11 +636,11 @@ Datum Lingo::getTheEntity(int entity, Datum &id, int field) {
 		d = _floatPrecision;
 		break;
 	case kTheFrame:
-		d = (int)score->getCurrentFrameNum();
+		d = (int)score->getLingoFrameNum();
 		break;
 	case kTheFrameLabel:
 		d.type = STRING;
-		d.u.s = new Common::String(score->getFrameLabel(score->getCurrentFrameNum()));
+		d.u.s = new Common::String(score->getFrameLabel(score->getLingoFrameNum()));
 		break;
 	case kTheFramePalette:
 		d = score->getCurrentPalette().toMultiplex();
@@ -1766,9 +1766,10 @@ Datum Lingo::getTheSprite(Datum &id1, int field) {
 		d = (int)(sprite->_colorcode & 0x7);
 		break;
 	case kTheScriptInstanceList:
-		warning("STUB: Getting the scriptInstanceList");
-		d.type = PARRAY;
-		d.u.parr = new PArray;
+		d.type = ARRAY;
+		d.u.farr = new FArray;
+		for (const Datum &instance : channel->_scriptInstanceList)
+			d.u.farr->arr.push_back(instance);
 		break;
 	case kTheScriptNum:
 		if (g_director->getVersion() >= 600) {
@@ -1959,6 +1960,9 @@ void Lingo::setTheSprite(Datum &id1, int field, Datum &d) {
 		break;
 	case kTheEditableText:
 		channel->_sprite->_editable = d.asInt();
+		channel->setEditable(d.asInt());
+		if (d.asInt() && channel->_widget)
+			g_director->_wm->setActiveWidget(channel->_widget);
 		break;
 	case kTheFlipH: // D7
 		sprite->_thickness = (sprite->_thickness & ~kTFlipH) | ((d.asInt() ? kTFlipH : 0));
@@ -2021,6 +2025,10 @@ void Lingo::setTheSprite(Datum &id1, int field, Datum &d) {
 			channel->setNeedsDraw();
 		}
 		channel->setPosition(d.asPoint().x, d.asPoint().y);
+
+		// A location assigned by Lingo remains under script control until the
+		// score explicitly releases it, just like separate locH/locV writes.
+		sprite->setAutoPuppet(kAPLoc, true);
 		break;
 	case kTheLocH:
 		if (d.asInt() != channel->getPosition().x) {
@@ -2230,7 +2238,12 @@ void Lingo::setTheCast(Datum &id1, int field, Datum &d) {
 		}
 		CastMember *replacement = (CastMember *)d.u.obj;
 		Cast *cast = movie->getCast(id);
-		cast->duplicateCastMember(replacement, nullptr, id.member);
+		// Replacing media preserves the destination member's name and metadata.
+		// Copy before duplication, which erases the old member and its info.
+		CastMemberInfo info;
+		if (CastMemberInfo *existing = cast->getCastMemberInfo(id.member))
+			info = *existing;
+		cast->duplicateCastMember(replacement, &info, id.member);
 		Score *score = movie->getScore();
 		score->refreshPointersForCastMemberID(id);
 		return;
@@ -2645,6 +2658,22 @@ void Lingo::getObjectProp(Datum &obj, Common::String &propName) {
 		Common::String key = Common::String::format("%d%s", kTheSprite, propName.c_str());
 		if (_theEntityFields.contains(key)) {
 			d = getTheSprite(obj, _theEntityFields[key]->field);
+		} else {
+			Movie *movie = _vm->getCurrentMovie();
+			Score *score = movie ? movie->getScore() : nullptr;
+			Channel *channel = score ? score->getChannelById(obj.u.i) : nullptr;
+
+			// Director exposes properties belonging to an attached behavior through
+			// its sprite reference.  Behaviors are searched in score order, just as
+			// they are for messages sent to a sprite.
+			if (channel) {
+				for (const Datum &instance : channel->_scriptInstanceList) {
+					if (instance.type == OBJECT && instance.u.obj->hasProp(propName)) {
+						d = instance.u.obj->getProp(propName);
+						break;
+					}
+				}
+			}
 		}
 		g_lingo->push(d);
 		return;
@@ -2744,15 +2773,7 @@ void Lingo::setObjectProp(Datum &obj, Common::String &propName, Datum &val) {
 		}
 
 		if (propName.equals("media")) {
-			if (val.type != MEDIA) {
-				warning("Lingo::setObjectProp(): setting the media with a non-MEDIA object, ignoring");
-				return;
-			}
-			CastMember *replacement = (CastMember *)val.u.obj;
-			Cast *cast = movie->getCast(id);
-			cast->duplicateCastMember(replacement, nullptr, id.member);
-			Score *score = movie->getScore();
-			score->refreshPointersForCastMemberID(id);
+			setTheCast(obj, kTheMedia, val);
 			return;
 		}
 
@@ -2770,6 +2791,20 @@ void Lingo::setObjectProp(Datum &obj, Common::String &propName, Datum &val) {
 		Common::String key = Common::String::format("%d%s", kTheSprite, propName.c_str());
 		if (_theEntityFields.contains(key)) {
 			setTheSprite(obj, _theEntityFields[key]->field, val);
+		} else {
+			Movie *movie = _vm->getCurrentMovie();
+			Score *score = movie ? movie->getScore() : nullptr;
+			Channel *channel = score ? score->getChannelById(obj.u.i) : nullptr;
+
+			if (channel) {
+				for (const Datum &instance : channel->_scriptInstanceList) {
+					if (instance.type == OBJECT && instance.u.obj->hasProp(propName)) {
+						instance.u.obj->setProp(propName, val);
+						g_debugger->propWriteHook(propName);
+						break;
+					}
+				}
+			}
 		}
 	} else {
 		g_lingo->lingoError("Lingo::setObjectProp: Invalid object: %s", obj.asString(true).c_str());

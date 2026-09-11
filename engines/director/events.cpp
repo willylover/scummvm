@@ -59,6 +59,12 @@ bool DirectorEngine::processSysEvents(bool captureClick, bool skipWindowManager)
 
 	Common::Event event;
 	while (pollEvent(event)) {
+		if (_skipTransitionMouseUp &&
+				(event.type == Common::EVENT_LBUTTONUP || event.type == Common::EVENT_RBUTTONUP)) {
+			_skipTransitionMouseUp = false;
+			continue;
+		}
+
 		if (Director::DT::isMouseInputIgnored()) {
 			if (Common::isMouseEvent(event)) {
 				if (event.type == Common::EVENT_LBUTTONDOWN) {
@@ -75,6 +81,26 @@ bool DirectorEngine::processSysEvents(bool captureClick, bool skipWindowManager)
 					window->render(true);
 				}
 				continue;
+			}
+		}
+
+		// Transitions poll for a press so they can be skipped. The press belongs to
+		// the transition itself: dispatching it through the window manager first can
+		// also activate a sprite already present in the destination frame. Consume
+		// the matching release as well, so one physical click cannot reach the movie.
+		if (captureClick) {
+			switch (event.type) {
+			case Common::EVENT_QUIT:
+				processEventQUIT();
+				return true;
+			case Common::EVENT_LBUTTONDOWN:
+			case Common::EVENT_RBUTTONDOWN:
+				_skipTransitionMouseUp = true;
+				return true;
+			case Common::EVENT_KEYDOWN:
+				return true;
+			default:
+				break;
 			}
 		}
 
@@ -173,6 +199,24 @@ bool Movie::processSysEvent(Common::Event &event) {
 			spriteId = _score->getActiveSpriteIDFromPos(event.mouse);
 		else
 			spriteId = _score->getMouseSpriteIDFromPos(event.mouse);
+
+		// A scripted drag surrogate must keep receiving the eventual mouseUp,
+		// but it should not hide rollover targets beneath the dragged artwork.
+		// Director games commonly use a behavior property named "dragging" for
+		// this purpose, including Willy Werkel's junk-to-garage door feedback.
+		if (event.type == Common::EVENT_MOUSEMOVE && spriteId > 0) {
+			Channel *channel = _score->getChannelById(spriteId);
+			bool dragging = false;
+			for (const Datum &instance : channel->_scriptInstanceList) {
+				if (instance.type == OBJECT && instance.u.obj->hasProp("dragging") &&
+						instance.u.obj->getProp("dragging").asInt()) {
+					dragging = true;
+					break;
+				}
+			}
+			if (dragging)
+				spriteId = _score->getMouseSpriteIDFromPos(event.mouse, spriteId - 1);
+		}
 
 		_currentHoveredSpriteId = spriteId;
 		_lastMousePos = event.mouse;
@@ -336,6 +380,13 @@ bool Movie::processSysEvent(Common::Event &event) {
 		return result;
 
 	case Common::EVENT_KEYDOWN:
+		// The native field editor runs before Director dispatches keyDown. Make
+		// its new contents visible to Lingo handlers in this same event.
+		if (sc->getSpriteIDOfActiveWidget()) {
+			Channel *channel = sc->getChannelById(sc->getSpriteIDOfActiveWidget());
+			if (channel && channel->_widget && channel->_sprite->_cast)
+				channel->_sprite->_cast->updateFromWidget(channel->_widget, channel->_sprite->_editable);
+		}
 		_vm->_keyCode = _vm->_KeyCodes.contains(event.kbd.keycode) ? _vm->_KeyCodes[event.kbd.keycode] : 0;
 		_vm->_key = event.kbd.ascii;
 		// While most non-letter keys don't affect "the keyPress", there
